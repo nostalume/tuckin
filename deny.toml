@@ -1,0 +1,53 @@
+# Dependency audit policy. D52 says "沿用 pulith 策略": the same four check families and the same
+# strict posture. The allow-list below is NOT copied from pulith - it is the exact atom set that
+# this closure needs, so that `license-not-encountered` stays silent and a new license shows up as
+# a real failure instead of hiding among seven unused allowances.
+
+[graph]
+all-features = true
+
+[advisories]
+ignore = [
+    # age -> i18n-embed-fl (proc-macro) -> i18n-config -> basic-toml.
+    # Build-time only: i18n-embed-fl is a proc-macro, so basic-toml never reaches the binary.
+    # age depends on i18n unconditionally, so no feature flip removes it.
+    { id = "RUSTSEC-2026-0374", reason = "build-time proc-macro chain (i18n-embed-fl); upstream age hard-depends on i18n, no upgrade path" },
+    # age -> hpke(p256) -> p256 -> elliptic-curve 0.13 -> crypto-bigint 0.5.5.
+    # p256 is a hard (non-optional) hpke feature, so the code is linked. Reachability: the only
+    # p256 operations in age are the `p256tag` recipient (src/native/tag.rs, tagpq/kem.rs).
+    # tuckin never constructs that recipient - seals use x25519 or scrypt only - and a stanza of
+    # an unknown type never enters the p256 path. A local CLI offers no remote timing oracle.
+    # Recheck when age bumps hpke/elliptic-curve, or if a p256tag entry point is ever added.
+    { id = "RUSTSEC-2026-0387", reason = "p256tag recipient unreachable from tuckin (x25519 + scrypt only); no remote timing oracle for a local CLI" },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = []
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    # ar_archive_writer, via psm's build-dependency chain (handlebars -> pest -> psm). Build-time
+    # only: it links archives while compiling psm, never ships in the binary.
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MIT",
+    # option-ext (via dirs) is the only weak-copyleft item in the closure: file-level MPL-2.0,
+    # no obligation unless those files are modified, and this crate is publish = false.
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+]
+
+# Every other SPDX expression in the closure is a disjunction that resolves into the set above:
+# `Apache-2.0 OR GPL-2.0-only` (self_cell) -> Apache-2.0;
+# `MIT OR Apache-2.0 OR LGPL-2.1-or-later` (r-efi) -> MIT;
+# `MIT OR Apache-2.0 OR BSD-1-Clause` (fiat-crypto) -> MIT;
+# `(MIT OR Apache-2.0) AND Unicode-3.0` (unicode-ident) -> both already allowed.

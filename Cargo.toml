@@ -1,0 +1,49 @@
+[package]
+name = "tuckin"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/nostalume/tuckin"
+publish = false
+
+# The dependency closure lives in one file so that `cargo tree`, `cargo deny` and the size
+# measurements read the same object. No logic lives here.
+
+[dependencies]
+# Configuration parsing only: no writer, no display formatting.
+toml = { version = "1.2.1", default-features = false, features = ["std", "serde", "parse"] }
+serde = { version = "1.0.229", features = ["derive"] }
+# Home and system directories.
+dirs = "7.0.0"
+# [ignore] globs.
+globset = "0.4.21"
+# Executable lookup for the `which` template helper and script interpreters.
+which = "8.0.6"
+# Template engine; no dir_source, no script_helper.
+handlebars = { version = "6.4.4", default-features = false }
+# Seal encryption. `age`'s `default` is `[]`, so `default-features = false` is a no-op here:
+# i18n, hpke/p256 and ml-kem are all non-optional, and no feature removes them. The only switch
+# that changes anything is `armor` (armored identity files). Measured marginal cost: 0.54 MiB of
+# image and 4.07 ms of cold start. The contact surface is locked to six types; `ssh`, `plugin`,
+# `p256tag` and direct `scrypt::Recipient` construction stay unused.
+age = { version = "0.12.1", default-features = false, features = ["armor"] }
+# Command line; color is deliberately off, because the block shape has to stay greppable.
+clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+# Hidden terminal input for editing one sealed body.
+rpassword = "7.5.5"
+# Four-field error enum.
+thiserror = "2.0.21"
+# Digests. Two sha2 lines exist in the closure (pulith 0.10, age 0.11) - unavoidable, since both
+# upstreams pin their own. tuckin joins the 0.10 line so the crate it shares with pulith's sha2
+# feature is the same one. The gate hashes in-memory bytes, so it uses sha2 directly.
+sha2 = "0.10.9"
+# Staged commit, atomic replace, mode and the record store.
+pulith = { version = "0.2.0", default-features = false, features = ["sha2"] }
+
+# Scoped script products and temporary directories in integration tests.
+tempfile = "3.27"
+
+[target.'cfg(windows)'.dependencies]
+# The Windows CLI publishes sealed targets on local NTFS.
+pulith = { version = "0.2.0", default-features = false, features = ["windows-private-preview"] }

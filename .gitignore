@@ -1,0 +1,23 @@
+# Rust
+/target/
+/dist/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Go
+/tuckin
+/tuckin.exe
+*.test
+*.out
+
+# Scratch and local artifacts
+/.scratch/
+*.log
+
+# Internal design notes (not user-facing docs)
+/.workbuddy/notes/
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

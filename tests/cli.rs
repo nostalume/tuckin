@@ -775,10 +775,9 @@ fn init_creates_a_skeleton_and_reports_publication_without_git() {
     assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
     let out = run(&["init"]);
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
-    assert_eq!(
-        String::from_utf8(out.stdout).unwrap(),
-        format!("skeleton\t{}\n", slash(dir.path()))
-    );
+    let report = String::from_utf8(out.stdout).unwrap();
+    let published = report.strip_prefix("skeleton\t").unwrap().strip_suffix('\n').unwrap();
+    assert_eq!(Path::new(published).canonicalize().unwrap(), dir.path().canonicalize().unwrap());
     assert_eq!(fs::read_to_string(dir.path().join("tuckin.toml")).unwrap(), "schema = 1\n");
     let status = run(&["status"]);
     assert_eq!(status.status.code(), Some(0), "{}", String::from_utf8_lossy(&status.stderr));

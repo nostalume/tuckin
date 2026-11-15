@@ -368,7 +368,7 @@ fn encrypted_add_can_resume_after_a_partial_publication() {
     let first = f.repo.path().join("home/a.txt");
     let sealed = fs::read(&first).unwrap();
     assert_one_whole_seal(&sealed);
-    assert!(!f.repo.path().join(&second).exists());
+    assert!(!f.repo.path().join(second).exists());
 
     let out = tuckin_age(f.repo.path(), &["add", "--encrypt", second], &envs);
     assert!(out.status.success(), "{out:?}");

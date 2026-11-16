@@ -26,17 +26,17 @@ tuckin --version
 
 **Linux 或 macOS 上的 Nix**
 
-发行标签上的 flake 会从源码构建。
+Nix 默认安装校验和固定的 GitHub 发行二进制。
 
 ```sh
-nix --extra-experimental-features 'nix-command flakes' profile add github:nostalume/tuckin/v0.1.0
+nix --extra-experimental-features 'nix-command flakes' profile add github:nostalume/tuckin
 tuckin --version
 ```
 
-当前源码中的 flake 还提供 `#binary`，从 GitHub 下载固定校验和的发行包，省去 Rust 编译。以下命令在 Tuckin 源码目录内运行。
+用 `#source` 从所选版本的源码构建。
 
 ```sh
-nix --extra-experimental-features 'nix-command flakes' profile add "path:$PWD#binary"
+nix --extra-experimental-features 'nix-command flakes' profile add 'github:nostalume/tuckin#source'
 ```
 
 **安装脚本**

@@ -26,17 +26,17 @@ To upgrade, run `scoop update` and then `scoop update tuckin`. The Release workf
 
 **Nix on Linux or macOS**
 
-The tagged flake builds Tuckin from source.
+The default Nix package installs a checksum-pinned GitHub release binary.
 
 ```sh
-nix --extra-experimental-features 'nix-command flakes' profile add github:nostalume/tuckin/v0.1.0
+nix --extra-experimental-features 'nix-command flakes' profile add github:nostalume/tuckin
 tuckin --version
 ```
 
-The flake in this checkout also offers `#binary`. It installs the published GitHub archive with a pinned checksum and skips the Rust build. Run this from the Tuckin source checkout.
+Use `#source` to build the selected source revision.
 
 ```sh
-nix --extra-experimental-features 'nix-command flakes' profile add "path:$PWD#binary"
+nix --extra-experimental-features 'nix-command flakes' profile add 'github:nostalume/tuckin#source'
 ```
 
 **Install script**

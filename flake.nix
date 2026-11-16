@@ -24,16 +24,8 @@
           pkgs = nixpkgs.legacyPackages.${system};
           archive = release.archives.${system};
           linux = pkgs.stdenv.hostPlatform.isLinux;
-        in {
-          default = pkgs.rustPlatform.buildRustPackage {
-            pname = manifest.package.name;
-            version = manifest.package.version;
-            src = self;
-            cargoLock.lockFile = ./Cargo.lock;
-            nativeCheckInputs = [ pkgs.git ];
-            meta.mainProgram = "tuckin";
-          };
-
+        in rec {
+          default = binary;
           binary = pkgs.stdenv.mkDerivation {
             pname = "tuckin-bin";
             inherit (release) version;
@@ -59,6 +51,15 @@
               test "$("$out/bin/tuckin" --version)" = "tuckin ${release.version}"
               runHook postInstallCheck
             '';
+            meta.mainProgram = "tuckin";
+          };
+
+          source = pkgs.rustPlatform.buildRustPackage {
+            pname = manifest.package.name;
+            version = manifest.package.version;
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            nativeCheckInputs = [ pkgs.git ];
             meta.mainProgram = "tuckin";
           };
         });

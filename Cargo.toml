@@ -47,3 +47,9 @@ tempfile = "3.27"
 [target.'cfg(windows)'.dependencies]
 # The Windows CLI publishes sealed targets on local NTFS.
 pulith = { version = "0.2.0", default-features = false, features = ["windows-private-preview"] }
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

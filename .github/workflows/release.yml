@@ -59,7 +59,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Publish release and its Scoop manifest
+      - name: Publish release
         working-directory: dist
         shell: bash
         env:
@@ -68,15 +68,54 @@ jobs:
         run: |
           tag=$GITHUB_REF_NAME
           [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          zip=tuckin-windows-x86_64.zip
-          archives=("$zip" tuckin-linux-x86_64.tar.gz tuckin-macos-aarch64.tar.gz)
-          hash=$(sha256sum "$zip" | cut -d' ' -f1)
-          jq -n --arg version "${tag#v}" --arg url "$GITHUB_SERVER_URL/$GH_REPO/releases/download/$tag/$zip" \
-            --arg hash "$hash" --arg homepage "$GITHUB_SERVER_URL/$GH_REPO" '{
-              version: $version, homepage: $homepage, license: "Apache-2.0",
-              description: "Manage dotfiles across machines",
-              architecture: {"64bit": {url: $url, hash: $hash}}, bin: "tuckin.exe"
-            }' > tuckin.json
-          assets=("${archives[@]}" install.sh install.ps1 tuckin.json)
+          assets=(tuckin-windows-x86_64.zip tuckin-linux-x86_64.tar.gz tuckin-macos-aarch64.tar.gz install.sh install.ps1)
           sha256sum "${assets[@]}" > SHA256SUMS
           gh release create "$tag" --verify-tag --generate-notes "${assets[@]}" SHA256SUMS
+
+  scoop:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: scoop-manifest
+      queue: max
+    steps:
+      - name: Update Scoop manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUCKET_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          tag=$GITHUB_REF_NAME
+          [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version=${tag#v}
+          path="repos/$GH_REPO/contents/tuckin.json"
+          current=$(gh api "$path" --method GET -f "ref=$BUCKET_BRANCH")
+          manifest=$(jq -er '.content' <<< "$current" | base64 -d | jq -e .)
+          previous=$(jq -er '.version | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' <<< "$manifest")
+          if [[ $(printf '%s\n' "$previous" "$version" | sort -V | tail -n 1) != "$version" ]]; then
+            printf 'Scoop already has %s.\n' "$previous"
+            exit 0
+          fi
+
+          url="$GITHUB_SERVER_URL/$GH_REPO/releases/download/$tag/tuckin-windows-x86_64.zip"
+          hash=$(gh api "repos/$GH_REPO/releases/tags/$tag" | jq -er --arg tag "$tag" --arg url "$url" '
+            select(.tag_name == $tag and .draft == false and .prerelease == false)
+            | .assets[]
+            | select(.browser_download_url == $url and .state == "uploaded")
+            | .digest | strings | select(test("^sha256:[0-9a-f]{64}$")) | ltrimstr("sha256:")
+          ')
+          updated=$(jq --arg version "$version" --arg url "$url" --arg hash "$hash" '
+            .version = $version | .architecture["64bit"] |= (.url = $url | .hash = $hash)
+          ' <<< "$manifest")
+          if [[ $updated == "$manifest" ]]; then
+            printf 'Scoop already has %s.\n' "$version"
+            exit 0
+          fi
+
+          content=$(printf '%s\n' "$updated" | base64 -w0)
+          gh api "$path" --method PUT -f "branch=$BUCKET_BRANCH" -f "message=Update Scoop manifest to $tag" \
+            -f "sha=$(jq -er '.sha' <<< "$current")" -f "content=$content" --jq '.commit.html_url'

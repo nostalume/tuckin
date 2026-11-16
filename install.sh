@@ -17,6 +17,10 @@ repo=${TUCKIN_REPOSITORY:-nostalume/tuckin}
 base="https://github.com/$repo/releases/download/$tag"
 archive="tuckin-$platform.tar.gz"
 bin_dir=${TUCKIN_INSTALL_DIR:-"$HOME/.local/bin"}
+case "$bin_dir" in
+    /*) ;;
+    *) bin_dir="$PWD/$bin_dir" ;;
+esac
 scratch=$(mktemp -d)
 trap 'rm -f "$scratch/$archive" "$scratch/SHA256SUMS" "$scratch/tuckin"; rmdir "$scratch"' EXIT
 trap 'exit 1' HUP INT TERM
@@ -36,5 +40,13 @@ fi
 
 tar -xzf "$scratch/$archive" -C "$scratch" tuckin
 mkdir -p "$bin_dir"
+bin_dir=$(cd "$bin_dir" && pwd -P)
 install -m 755 "$scratch/tuckin" "$bin_dir/tuckin"
 printf 'Installed %s\n' "$bin_dir/tuckin"
+case ":${PATH:-}:" in
+    *":$bin_dir:"*) ;;
+    *)
+        quoted=$(printf '%s' "$bin_dir" | sed "s/'/'\\\\''/g")
+        printf "Run in your current shell and add to its startup file for future sessions:\n  export PATH='%s':\"\$PATH\"\n" "$quoted"
+        ;;
+esac

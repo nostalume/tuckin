@@ -1,37 +1,60 @@
 # tuckin architecture
 
-[简体中文](architecture.zh-CN.md) · [Getting started](../README.md) · [Behavior specification](spec.md)
+[简体中文](architecture.zh-CN.md) · [Tutorial](../README.md) · [Behavior specification](spec.md)
 
-Tuckin owns the repository's declarations, which target each entry manages, and where a file or script operation may act. Pulith provides local file access, digests, private staging, and conditional publication. Tuckin supplies the bytes and the conditions for publishing them.
+## What the repository controls
 
-## Target ownership and evaluation
+A repository assigns a source spelling to each managed file. Its mapping and the current platform together give that source one target. A machine's tags can exclude entries and supply template values. Each admitted source owns either the bytes of its entire target or the ranges found by its patch locators. A seal supplies bytes to either form and requires private publication of the entire file. Source ownership is decided before reading the selected contents, so a single-file operation and a whole-repository operation agree on where that file belongs.
 
-```text
-repository declarations + machine context
-  → resolve target ownership for the repository
-  → evaluate the selected sources and targets
-  → plan verdicts, bytes, protection, and predecessor conditions
-  → report the plan or publish the selected writes
+## Objects and their relations
+
+```mermaid
+flowchart TD
+    Config["Config and active tags"] --> Repo["Repo + mapping table"]
+    Tree["Repository entries"] --> Repo
+    Repo --> Entry["Entry: source spelling and translated target"]
+    Entry --> Place["Resolved target position"]
+    Parents["Observed parent directories"] --> Place
+    Entry --> Source["Parsed source form"]
+    Config --> Data["Effective template data"]
+    Data --> Rendered
+    Source --> Rendered["Rendered bytes, patch blocks, or seal"]
+    Identity["Local identity"] --> Item
+    Place --> Item["Plan item: position, verdict, bytes, protection, predecessor"]
+    Rendered --> Item
+    Target["Observed target"] --> Item
+    Item --> Report["status / diff"]
+    Item --> Publish["Pulith file publication"]
 ```
 
-Mappings give each source one destination per admitted platform. Platform and tag rules admit sources and scripts. The scan reads the active tags from the checkout's metadata and uses the same list for admission and public template data. Tags can only exclude paths, so portable mapping conflicts can be decided using each platform's untagged set. Resolving parent directories also detects targets that share a position through aliases.
+| Object and owner | Responsibility |
+| --- | --- |
+| [Configuration](../src/config.rs) and [data](../src/data.rs) | Parse declarations into map rows, ignore rules, recipient policy, and raw data. The template context overlays OS and tag layers when a command needs values. Both file and script admission use the scan's active tags. |
+| [Spelling and mapping table](../src/spell.rs) | Bind a repository path to a platform destination, retaining the distinction between a source name and a machine path. The table covers symbolic target comparisons and resolves system directories once per table. |
+| [Repository and entries](../src/scan.rs) | Own the root, table, admitted entries, and machine inputs for one run. An entry couples the spelling with the translated destination. Placement resolves destination parents and detects actual aliases, parent-file conflicts, and collisions with the repository or identity. |
+| [Content forms](../src/content.rs) and [patch locators](../src/patch.rs) | Interpret a source as literal or rendered whole-file bytes, a whole-file seal, or ordered patch blocks. Each patch block carries its locator and body. Write-back uses the same source interpretation with original source spans. |
+| [Vault and recipients](../src/seal.rs) | The vault opens existing ciphertext with local identities. Recipients select public keys for new ciphertext. Identity location is also an input to placement, so even a command with no selected seals respects the reserved key position. |
+| [File plan](../src/plan.rs) | Pair the resolved position and source result with an observation of the target. Each item carries the expected bytes, verdict, privacy requirement, and any publication condition derived from the observed bytes. |
+| [Reports](../src/out.rs) and [publication](../src/commit.rs) | The report projects plan data. Publication submits the planned bytes and admission conditions to Pulith, then counts actual outcomes. |
 
-Placement and selection answer different questions. The whole repository determines which files are managed and whether positions conflict. The selector determines whose contents are evaluated. This lets a single-file preview use the same ownership rules as a full run while reading only that entry's contents.
+## Trace a patch from preview to write
 
-## From source to publication
+Suppose `home/@config/zed/settings.json` declares a line patch. The table first maps its source spelling using the chosen platform row. The scan checks the complete ownership layout. Then the planner resolves the target position and reads that entry's source and existing target. All blocks locate their ranges on the same input. Each replacement preserves the surrounding bytes and its locators. Re-evaluation on the candidate output establishes that applying those same bodies again would produce no byte changes.
 
-Source validation establishes the file form, patch rules, and seal positions. Deployment and write-back share that interpretation. The write-back path uses the declared spans to preserve surrounding source text.
+`diff` projects the verdict. A later standalone `apply` creates a fresh plan. A writing plan for the patch carries the digest of the input used to derive the replacement, and Pulith enforces that predecessor at publication. If another process has edited the target in between, a new plan can evaluate the new bytes. A whole-file source supplies its own complete contents and admits creation or replacement of a regular file. Its actual publication outcome may differ from the preview if a regular file appeared or disappeared in the meantime.
 
-A whole-file declaration supplies the expected bytes. A patch locates all of its ranges in the same original target, preserves its boundaries, and derives the expected bytes from that observation. Because the result depends on the original bytes, patch publication carries a digest of the same input. Pulith checks that predecessor condition before replacement.
+Planning validates placement for the admitted repository and evaluates content for the selected entries. This keeps per-file previews meaningful without reading the contents of all other files. The comparison view may do bounded line work beyond the file plan. Neither that projection nor the script cache supplies permission for a file write.
 
-The file plan is available to both read-only reports and `apply`. All selected entries are planned before publication. A failed publication stops the batch with earlier writes preserved. `absorb` explicitly captures eligible target changes back into the source.
+## Effects and recovery
 
-## Seals and script execution
+Tuckin decides **which** file positions to manage, **what** bytes to write, and **under what condition**. Pulith owns local type observations, opened files, staging and replacement, digest admission, and private access on the staged file. A sealed write asks for a private staging operation before plaintext is written. Tuckin reports unavailable platform support during planning when it can identify it, and requests protection repair if a target already agrees by byte.
 
-The repository declares public recipients for new ciphertext. Local identities open existing seals. Key initialization uses the same identity path and parser as decryption. A missing identity is created with private, create-only publication. The first recipient is bound only after the identity exists, using the configuration snapshot the command read. A retry can reuse that identity. A seal contributes bytes and a private publication requirement to the file plan.
+A complete selected file plan precedes target publication. Each file has its own publication boundary. An error leaves the completed prefix in place. Retrying starts from new observations. This is a file-scoped guarantee on the operations Pulith admits. Directory resolution and a preview do not grant an immutable snapshot of the whole machine.
 
-Pulith establishes owner-only protection on the staged handle before it writes plaintext, then publishes the staged file. Windows supplies this operation on local NTFS. The planner can reject a known unsupported destination before publication and can schedule protection repair when the bytes already agree. A protected editor session has a separate lifetime that includes the editor and its temporary files.
+Source writes follow the same division of responsibility. `add` supplies a missing-source condition. `absorb` collects only representable source bytes and carries the digest of the source it used. Writing back a sealed body keeps the original sealed representation when its plaintext is unchanged. Creating an identity is create-only and private. Binding the first recipient is a subsequent conditional configuration write, so retries can reuse an identity created before a configuration write failed.
 
-Scripts share repository admission and public rendering inputs. The extension selects a runtime independently of the host. After cache selection, preparation binds each required runtime to one local executable. A missing runtime stops preparation before file publication. Execution then uses the prepared program and script path in spelling order. The gate digest includes the dispatch rule and rendered bytes, and successes are recorded only after the script phase succeeds.
+## Script lifetime
 
-The [behavior specification](spec.md) defines the command surface, platform dispatch, and observable failures.
+The [script phase](../src/scripts.rs) derives its own ordered script list from repository admission and public template data. Its interpreter is chosen by extension. [Gate records](../src/gate.rs) can remove already successful tasks from the runnable list before executable lookup. The remaining runtimes and temporary script products are prepared before file writes. Programs then run in the repository root after those writes. Their effects follow the calling account's authority. A script failure retains file writes and effects from programs already run. Gate records are updated after the phase succeeds.
+
+The [behavior specification](spec.md) defines supported syntax, command results, and diagnostics.

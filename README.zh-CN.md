@@ -10,7 +10,7 @@
 
 ## 安装
 
-发行包支持 Windows x64、Linux x64 和 Apple Silicon macOS。[下载 v0.1.1](https://github.com/nostalume/tuckin/releases/tag/v0.1.1) · [从源码构建](#build)
+发行包支持 Windows x64、Linux x64 和 Apple Silicon macOS。[下载 v0.1.2](https://github.com/nostalume/tuckin/releases/tag/v0.1.2) · [从源码构建](#build)
 
 **Windows 上的 Scoop**
 
@@ -41,16 +41,16 @@ nix --extra-experimental-features 'nix-command flakes' profile add 'github:nosta
 
 **安装脚本**
 
-在脚本所在目录运行对应平台的命令。脚本会校验发行包，默认将程序安装到 `~/.local/bin`。[发行版 PowerShell 脚本](https://github.com/nostalume/tuckin/releases/download/v0.1.1/install.ps1) · [发行版 shell 脚本](https://github.com/nostalume/tuckin/releases/download/v0.1.1/install.sh)
+在脚本所在目录运行对应平台的命令。脚本会校验发行包，默认将程序安装到 `~/.local/bin`。[发行版 PowerShell 脚本](https://github.com/nostalume/tuckin/releases/download/v0.1.2/install.ps1) · [发行版 shell 脚本](https://github.com/nostalume/tuckin/releases/download/v0.1.2/install.sh)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 v0.1.1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 v0.1.2
 ```
 
 PowerShell 脚本会把默认安装目录加入用户 PATH。重新打开终端后运行 `tuckin --version`。也可用 `& "$HOME\.local\bin\tuckin.exe" --version` 直接确认。
 
 ```sh
-sh install.sh v0.1.1
+sh install.sh v0.1.2
 export PATH="$HOME/.local/bin:$PATH"
 tuckin --version
 ```
@@ -140,7 +140,7 @@ tuckin add --encrypt home/.tuckin-demo-token
 tuckin diff --patch home/.tuckin-demo-token
 ```
 
-仓库里现在用 `seal` 块保存密文。Tuckin 会创建或复用本地私钥，也可以把对应的公钥写进 `tuckin.toml`。把私钥和备份留在仓库外。若令牌只是配置里的一个字段，可以给补丁命名，再用 `tuckin edit PATH --seal=NAME`。换机器时可查阅[身份路径与恢复](docs/spec.zh-CN.md#seals)。
+仓库里现在用 `seal` 块保存密文。Tuckin 会创建或复用本地私钥，也可以把对应的公钥写进 `tuckin.toml`。把私钥和备份留在仓库外。要交互式修改密封文件，用 `EDITOR` 指定可信且会等待文件关闭的编辑器，再运行 `tuckin edit home/.tuckin-demo-token`。Windows 上需要 Tuckin 0.1.2 或更新版本，临时目录须位于本机 NTFS 卷。若令牌只是配置里的一个字段，可以给补丁命名，再用 `tuckin edit PATH --seal=NAME`。换机器时可查阅[身份路径与恢复](docs/spec.zh-CN.md#seals)。
 
 <a id="scripts"></a>
 

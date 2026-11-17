@@ -1590,11 +1590,6 @@ mod shell {
 
     /// Records that it ran, beside itself, and touches nothing else. Proves a refused run never
     /// started the editor.
-    #[cfg(windows)]
-    pub fn witness() -> (&'static str, &'static str) {
-        ("witness.cmd", "@echo off\r\necho ran> \"%~dp0witness.txt\"\r\n")
-    }
-
     /// Stands in for `$EDITOR` by replacing the file's whole content with `text`.
     #[cfg(not(windows))]
     pub fn writer(text: &str) -> (&'static str, String) {
@@ -3187,7 +3182,6 @@ fn add_without_encrypt_never_touches_the_identity() {
 /// A round trip that saves nothing leaves the source byte for byte as it was. That is the whole
 /// point of per-seal comparison: age draws a fresh file key on every call, so re-sealing an
 /// untouched body would make every save a diff.
-#[cfg(unix)]
 #[test]
 fn edit_round_trips_a_whole_seal_byte_for_byte() {
     let f = bare_repo();
@@ -3207,7 +3201,12 @@ fn edit_round_trips_a_whole_seal_byte_for_byte() {
     // run's temporaries and nothing else's.
     let plaintext_dir = TempDir::new().unwrap();
     let plaintext_path = slash(plaintext_dir.path());
-    let envs = [("AGE_IDENTITY_FILE", identity_text.as_str()), ("TMPDIR", plaintext_path.as_str())];
+    let envs = [
+        ("AGE_IDENTITY_FILE", identity_text.as_str()),
+        ("TMPDIR", plaintext_path.as_str()),
+        ("TMP", plaintext_path.as_str()),
+        ("TEMP", plaintext_path.as_str()),
+    ];
     let editor = executable(keys.path(), shell::silent().0, shell::silent().1);
     let out = tuckin_edited(f.repo.path(), &["edit", "home/a.txt"], &envs, &editor);
     assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
@@ -3381,30 +3380,57 @@ fn edit_keeps_a_plaintext_that_ends_in_a_backslash() {
     assert_eq!(fs::read(&source_path).unwrap(), before);
 }
 
-/// Windows editing requires a verified workspace for plaintext and editor backups.
-/// The refusal happens before the identity is opened and before the editor starts.
 #[cfg(windows)]
 #[test]
-fn edit_refuses_a_sealed_file_before_starting_the_editor() {
+fn edit_protects_windows_plaintext_and_an_editor_replacement() {
     let f = fixture();
-    let sealed = "{{#seal}}AAAA{{/seal}}";
-    fs::write(f.repo.path().join("home/a.txt"), sealed).unwrap();
-    let (_keys, identity) = identity_dir();
+    let (keys, identity) = identity_dir();
+    configure_seals(f.repo.path(), &identity);
     let identity_text = slash(&identity);
-    let editor_dir = TempDir::new().unwrap();
-    let editor = executable(editor_dir.path(), shell::witness().0, shell::witness().1);
-    let out = tuckin_edited(
-        f.repo.path(),
-        &["edit", "home/a.txt"],
-        &[("AGE_IDENTITY_FILE", identity_text.as_str())],
-        &editor,
+    let plaintext_dir = TempDir::new().unwrap();
+    let plaintext_path = slash(plaintext_dir.path());
+    let envs = [
+        ("AGE_IDENTITY_FILE", identity_text.as_str()),
+        ("TEMP", plaintext_path.as_str()),
+        ("TMP", plaintext_path.as_str()),
+    ];
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/windows-editor-session.ps1");
+    let editor = executable(
+        keys.path(),
+        "editor.cmd",
+        format!(
+            "@echo off\r\npowershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\" \"%~1\"\r\nexit /b %ERRORLEVEL%\r\n",
+            script.display()
+        ),
     );
-    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
-    let text = String::from_utf8(out.stderr).unwrap();
-    assert_eq!(text.split(':').next(), Some("E-P1"), "{text:?}");
-    assert!(!editor_dir.path().join("witness.txt").exists(), "the editor never started");
-    assert!(!identity.exists(), "the identity is not opened");
-    assert_eq!(fs::read(f.repo.path().join("home/a.txt")).unwrap(), sealed.as_bytes());
+    let target = f.target.path().join("a.txt");
+    fs::write(&target, b"first").unwrap();
+    let source = f.repo.path().join("home/a.txt");
+    fs::remove_file(&source).unwrap();
+    let add = tuckin_age(f.repo.path(), &["add", "--encrypt", "home/a.txt"], &envs);
+    assert!(add.status.success(), "{add:?}");
+    let seed = tuckin_age(f.repo.path(), &["apply", "--no-scripts"], &envs);
+    assert!(seed.status.success(), "{seed:?}");
+
+    let before = fs::read(&source).unwrap();
+    let (name, body) = shell::failing();
+    let failing = executable(keys.path(), name, body);
+    let failed = tuckin_edited(f.repo.path(), &["edit", "home/a.txt"], &envs, &failing);
+    assert_eq!(failed.status.code(), Some(2), "{failed:?}");
+    assert_eq!(fs::read(&source).unwrap(), before);
+    assert_eq!(fs::read_dir(plaintext_dir.path()).unwrap().count(), 0);
+
+    let edit = tuckin_edited(f.repo.path(), &["edit", r".\home\a.txt"], &envs, &editor);
+    assert!(edit.status.success(), "{edit:?}");
+    assert!(edit.stdout.is_empty(), "{edit:?}");
+    assert_eq!(fs::read_dir(plaintext_dir.path()).unwrap().count(), 0);
+    let sealed = fs::read(&source).unwrap();
+    assert_one_whole_seal(&sealed);
+    assert!(!sealed.windows(6).any(|window| window == b"second"));
+
+    let apply = tuckin_age(f.repo.path(), &["apply", "--no-scripts"], &envs);
+    assert!(apply.status.success(), "{apply:?}");
+    assert_eq!(fs::read(target).unwrap(), b"second");
 }
 
 /// A source with no seal is opened as it is: no temporary file, no identity, no decoding. The

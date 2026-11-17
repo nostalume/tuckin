@@ -102,7 +102,8 @@ enum CliCmd {
         long_about = concat!(
             "Open existing repository files with $EDITOR. Set it to one executable name or\n",
             "path. Omit PATH to open tuckin.toml. Specify exact file paths to edit other files.\n",
-            "POSIX supports protected editing of sealed sources. Use seal options on Windows.\n",
+            "Sealed sources use a private temporary directory. On Windows it needs local NTFS.\n",
+            "Set EDITOR to a program that waits until you close the file.\n",
             "\n",
             "Seal options require configured recipients and write one exact source file.\n",
             "--seal takes nonempty hidden input or raw bytes from redirected stdin. It\n",

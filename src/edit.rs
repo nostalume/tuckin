@@ -1,8 +1,8 @@
 //! `edit`: expand every seal into a private temporary file, hand it to `$EDITOR`, collapse back.
 //!
 //! The temporary file is the only place a seal's plaintext exists outside the target, and it
-//! lives for one editor round trip: it is created `0600`, outside the repository, and removed on
-//! every exit path. The source holds ciphertext before and after; only bodies the editor changed
+//! lives for one editor round trip: it is published privately outside the repository and removed
+//! with its session. The source holds ciphertext before and after; only bodies the editor changed
 //! are re-sealed, because age draws a fresh file key each time and an untouched field would
 //! otherwise churn on every save.
 //!
@@ -15,8 +15,6 @@
 //! opened as text for repair.
 
 use std::env;
-#[cfg(unix)]
-use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,7 +27,12 @@ use crate::content::{self, Outline, SealSite, SourceLayout};
 use crate::diag::Error;
 use crate::files::read_regular;
 use crate::scan::{is_git_metadata, is_metadata, read_source, repository_entry, repository_kind};
-use crate::seal::{self, Recipients, Vault};
+#[cfg(windows)]
+use crate::seal;
+use crate::seal::{Recipients, Vault};
+
+#[cfg(windows)]
+mod windows;
 
 const EDITOR_VARIABLE: &str = "EDITOR";
 
@@ -249,18 +252,16 @@ fn rewrite(
     vault: &Vault,
     recipients: Option<&Recipients>,
 ) -> Result<(), Error> {
-    if cfg!(windows) {
-        return Err(seal::private_unavailable(
-            name,
-            format!("{name} needs a protected plaintext editor session"),
-            &format!("use `tuckin edit {name} --seal` for explicit secret input, or edit on POSIX"),
-        )
-        .into());
-    }
+    let temp = PlainTemp::new(name, root)?;
     let plain = expansion.plaintext(vault, name)?;
-    let temp = PlainTemp::new(name, &expansion.wire(source, &plain))?;
-    run(editor, temp.path(), root, name)?;
+    temp.write(name, &expansion.wire(source, &plain))?;
+    #[cfg(windows)]
+    let editor_path = windows::editor_path(&temp.path);
+    #[cfg(unix)]
+    let editor_path = &temp.path;
+    run(editor, editor_path.as_ref(), root, name)?;
     let edited = temp.read(name)?;
+    temp.close(name)?;
     let bytes = expansion.collapse(name, source, &edited, &plain, recipients)?;
     editable(root, name)?;
     replace(name, &root.join(name), &bytes, DigestValue::sha256(source))
@@ -311,50 +312,94 @@ fn decode_wire(wire: &[u8]) -> Vec<u8> {
     plain
 }
 
-/// A plaintext file in an owner-only session directory, removed when this value drops.
+#[cfg(unix)]
+type Session = tempfile::TempDir;
+#[cfg(windows)]
+use windows::Session;
+
+/// A private file inside a private session directory. Editor-created sibling files inherit
+/// the Windows directory's owner-only DACL and stay inside the POSIX directory's 0700 boundary.
 struct PlainTemp {
     path: PathBuf,
-    _session: tempfile::TempDir,
+    session: Session,
 }
 
 impl PlainTemp {
-    fn new(name: &str, bytes: &[u8]) -> Result<PlainTemp, Error> {
+    fn new(name: &str, root: &Path) -> Result<Self, Error> {
+        let base = env::temp_dir().canonicalize().map_err(|error| {
+            Error::bare(format!("{name}: cannot resolve the temporary directory: {error}"))
+        })?;
+        let repository = root.canonicalize().map_err(|error| {
+            Error::bare(format!("{name}: cannot resolve the repository: {error}"))
+        })?;
+        if crate::scan::folded_path(&base).starts_with(crate::scan::folded_path(&repository)) {
+            return Err(Error::bare(format!(
+                "{name}: choose a temporary directory outside the repository"
+            )));
+        }
+
         #[cfg(unix)]
-        {
+        let session = {
+            use std::fs;
             use std::os::unix::fs::PermissionsExt;
 
             let session = tempfile::Builder::new()
                 .prefix(".tuckin-edit-")
                 .permissions(fs::Permissions::from_mode(0o700))
-                .tempdir()
-                .map_err(|error| {
-                    Error::bare(format!("{name}: cannot create the editor session: {error}"))
-                })?;
-            fs::set_permissions(session.path(), fs::Permissions::from_mode(0o700)).map_err(
-                |error| Error::bare(format!("{name}: cannot protect the editor session: {error}")),
-            )?;
-            let path = session.path().join(name.rsplit('/').next().unwrap_or("plaintext"));
-            LocalPath::new(&path)
-                .and_then(|target| target.publish_private_file(bytes, FileAdmission::Absent))
-                .map_err(|error| {
-                    Error::bare(format!("{name}: cannot create the temporary plaintext: {error}"))
-                })?;
-            Ok(PlainTemp { path, _session: session })
-        }
+                .tempdir_in(&base)
+                .map_err(|error| session_error(name, error))?;
+            fs::set_permissions(session.path(), fs::Permissions::from_mode(0o700))
+                .map_err(|error| session_error(name, error))?;
+            session
+        };
         #[cfg(windows)]
-        {
-            let _ = bytes;
-            Err(Error::bare(format!("{name}: private editing is unavailable")))
-        }
+        let session = {
+            let mut nonce = [0u8; 16];
+            getrandom::fill(&mut nonce).map_err(|error| session_error(name, error))?;
+            let leaf = format!(".tuckin-edit-{:032x}", u128::from_ne_bytes(nonce));
+            let dir = base.join(leaf);
+            LocalPath::new(&dir).and_then(|path| path.check_private_publication()).map_err(
+                |error| match error {
+                    pulith::local::LocalError::PrivatePublicationUnavailable(_) => {
+                        seal::private_unavailable(
+                            name,
+                            format!("{} cannot host a private editor session", base.display()),
+                            "point TEMP and TMP to a local NTFS directory or use edit --seal",
+                        )
+                        .into()
+                    }
+                    other => session_error(name, other),
+                },
+            )?;
+            Session::create(dir).map_err(|error| session_error(name, error))?
+        };
+        let path = session.path().join(name.rsplit('/').next().unwrap_or("plaintext"));
+        Ok(Self { path, session })
     }
 
-    fn path(&self) -> &Path {
-        &self.path
+    fn write(&self, name: &str, bytes: &[u8]) -> Result<(), Error> {
+        LocalPath::new(&self.path)
+            .and_then(|target| target.publish_private_file(bytes, FileAdmission::Absent))
+            .map(|_| ())
+            .map_err(|error| {
+                Error::bare(format!("{name}: cannot create the temporary plaintext: {error}"))
+            })
     }
 
     fn read(&self, name: &str) -> Result<Vec<u8>, Error> {
         read_regular(&self.path, name, "temporary plaintext")
     }
+
+    fn close(self, name: &str) -> Result<(), Error> {
+        let path = self.session.path().display().to_string();
+        self.session.close().map_err(|error| {
+            Error::bare(format!("{name}: cannot remove private editor session {path}: {error}"))
+        })
+    }
+}
+
+fn session_error(name: &str, error: impl std::fmt::Display) -> Error {
+    Error::bare(format!("{name}: cannot prepare the private editor session: {error}"))
 }
 
 fn run(editor: &str, path: &Path, root: &Path, name: &str) -> Result<(), Error> {

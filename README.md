@@ -10,7 +10,7 @@ Keep one dotfiles repository for all your machines. Tuckin can deploy a file you
 
 ## Install
 
-Release archives cover Windows x64, Linux x64, and Apple Silicon macOS. [Download v0.1.1](https://github.com/nostalume/tuckin/releases/tag/v0.1.1) · [Build from source](#build)
+Release archives cover Windows x64, Linux x64, and Apple Silicon macOS. [Download v0.1.2](https://github.com/nostalume/tuckin/releases/tag/v0.1.2) · [Build from source](#build)
 
 **Scoop on Windows**
 
@@ -41,16 +41,16 @@ nix --extra-experimental-features 'nix-command flakes' profile add 'github:nosta
 
 **Install script**
 
-Run the command for your platform from the directory containing the script. Each script verifies the release archive and installs into `~/.local/bin` by default. [Released PowerShell script](https://github.com/nostalume/tuckin/releases/download/v0.1.1/install.ps1) · [Released shell script](https://github.com/nostalume/tuckin/releases/download/v0.1.1/install.sh)
+Run the command for your platform from the directory containing the script. Each script verifies the release archive and installs into `~/.local/bin` by default. [Released PowerShell script](https://github.com/nostalume/tuckin/releases/download/v0.1.2/install.ps1) · [Released shell script](https://github.com/nostalume/tuckin/releases/download/v0.1.2/install.sh)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 v0.1.1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 v0.1.2
 ```
 
 The PowerShell script adds the default directory to your user PATH. Reopen your terminal and run `tuckin --version`. To check the installed executable directly, run `& "$HOME\.local\bin\tuckin.exe" --version`.
 
 ```sh
-sh install.sh v0.1.1
+sh install.sh v0.1.2
 export PATH="$HOME/.local/bin:$PATH"
 tuckin --version
 ```
@@ -140,7 +140,7 @@ tuckin add --encrypt home/.tuckin-demo-token
 tuckin diff --patch home/.tuckin-demo-token
 ```
 
-The repository now has a `seal` block in place of the token. Tuckin creates or reuses a local private identity and can set its public key in `tuckin.toml`. Keep the private identity and its backup outside the repository. To manage a token within a larger file, give its patch a name and use `tuckin edit PATH --seal=NAME`. See [identity paths and recovery](docs/spec.md#seals) when moving to another machine.
+The repository now has a `seal` block in place of the token. Tuckin creates or reuses a local private identity and can set its public key in `tuckin.toml`. Keep the private identity and its backup outside the repository. To update the file interactively, set `EDITOR` to a trusted editor that waits for the file to close and run `tuckin edit home/.tuckin-demo-token`. On Windows, this needs Tuckin 0.1.2 or later and a local NTFS temporary directory. To manage a token within a larger file, give its patch a name and use `tuckin edit PATH --seal=NAME`. See [identity paths and recovery](docs/spec.md#seals) when moving to another machine.
 
 <a id="scripts"></a>
 

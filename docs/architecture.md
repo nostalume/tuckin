@@ -59,6 +59,8 @@ A complete selected file plan precedes target publication. Each file has its own
 
 Source writes follow the same division of responsibility. `add` supplies a missing-source condition. `absorb` collects only representable source bytes and carries the digest of the source it used. Writing back a sealed body keeps the original sealed representation when its plaintext is unchanged. Creating an identity is create-only and private. Binding the first recipient is a subsequent conditional configuration write, so retries can reuse an identity created before a configuration write failed.
 
+For interactive editing, a private session directory owns the plaintext draft and in-directory editor copies. The Windows adapter creates an inheritable owner-only DACL on local NTFS and verifies it on the directory handle held during the edit. Pulith publishes the initial private draft. Tuckin reads the returned draft and cleans up the session before making a conditional ciphertext write.
+
 ## Script lifetime
 
 The [script phase](../src/scripts.rs) derives its own ordered script list from repository admission and public template data. Its interpreter is chosen by extension. [Gate records](../src/gate.rs) can remove already successful tasks from the runnable list before executable lookup. The remaining runtimes and temporary script products are prepared before file writes. Programs then run in the repository root after those writes. Their effects follow the calling account's authority. A script failure retains file writes and effects from programs already run. Gate records are updated after the phase succeeds.

@@ -6,15 +6,15 @@
     let
       manifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       release = {
-        version = "0.1.0";
+        version = "0.1.1";
         archives = {
           x86_64-linux = {
             platform = "linux-x86_64";
-            hash = "sha256-85QO/9sHWHgv1cGzva+LPnWv/zEqbCZc4g0oVpJAu/o=";
+            hash = "sha256-U5oX6Zt0E7R8e4q92JJMoRBdk+UoT4+aplEw+Gt2NCc=";
           };
           aarch64-darwin = {
             platform = "macos-aarch64";
-            hash = "sha256-LVFH3/y8J8NXm3VAOR45dBFwhV8xsUmQA6V4c+bqs7U=";
+            hash = "sha256-Q2ynZOBhxBLjacS/mq+w2LAYxrsTln/9pvpMxPhNSig=";
           };
         };
       };

@@ -1,12 +1,12 @@
 {
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Manage dotfiles across machines",
   "homepage": "https://github.com/nostalume/tuckin",
   "license": "Apache-2.0",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/nostalume/tuckin/releases/download/v0.1.1/tuckin-windows-x86_64.zip",
-      "hash": "750bcfbb9141efea30c72b94d8c0a82dc12669f901b1187c4526b94222240f07"
+      "url": "https://github.com/nostalume/tuckin/releases/download/v0.1.2/tuckin-windows-x86_64.zip",
+      "hash": "ee5bca4ef312f5c163bf41b8e527125d4dc0fe915c84aa22dd99c255af7007e7"
     }
   },
   "bin": "tuckin.exe",

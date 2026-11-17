@@ -1,6 +1,6 @@
 [package]
 name = "tuckin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -38,6 +38,8 @@ thiserror = "2.0.21"
 # upstreams pin their own. tuckin joins the 0.10 line so the crate it shares with pulith's sha2
 # feature is the same one. The gate hashes in-memory bytes, so it uses sha2 directly.
 sha2 = "0.10.9"
+hmac = "0.12.1"
+getrandom = "0.4.3"
 # Staged commit, atomic replace, mode and the record store.
 pulith = { version = "0.2.0", default-features = false, features = ["sha2"] }
 

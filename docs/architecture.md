@@ -24,7 +24,11 @@ flowchart TD
     Rendered --> Item
     Target["Observed target"] --> Item
     Item --> Report["status / diff"]
-    Item --> Publish["Pulith file publication"]
+    State["Local deployment records"] --> Item
+    Item --> Admit["Admitted selected plan"]
+    Admit --> Publish["Pulith file publication"]
+    Publish --> Receipt["Actual apply receipt"]
+    Publish --> State
 ```
 
 | Object and owner | Responsibility |
@@ -41,11 +45,13 @@ flowchart TD
 
 Suppose `home/@config/zed/settings.json` declares a line patch. The table first maps its source spelling using the chosen platform row. The scan checks the complete ownership layout. Then the planner resolves the target position and reads that entry's source and existing target. All blocks locate their ranges on the same input. Each replacement preserves the surrounding bytes and its locators. Re-evaluation on the candidate output establishes that applying those same bodies again would produce no byte changes.
 
-`diff` projects the verdict. A later standalone `apply` creates a fresh plan. A writing plan for the patch carries the digest of the input used to derive the replacement, and Pulith enforces that predecessor at publication. If another process has edited the target in between, a new plan can evaluate the new bytes. A whole-file source supplies its own complete contents and admits creation or replacement of a regular file. Its actual publication outcome may differ from the preview if a regular file appeared or disappeared in the meantime.
+`diff` projects the candidate and its verdict. A standalone `apply` makes a fresh plan and admits the selected batch before it reaches publication. The planner compares each managed range with its local record. A line locator owns its suffix, a between locator owns its interval, and a whole source owns the file. The plan supplies the full observed digest for any replacement and requires a free destination for creation. Pulith checks that condition at publication. Actual file outcomes are retained for the receipt, including when the script phase fails.
 
 Planning validates placement for the admitted repository and evaluates content for the selected entries. This keeps per-file previews meaningful without reading the contents of all other files. The comparison view may do bounded line work beyond the file plan. Neither that projection nor the script cache supplies permission for a file write.
 
 ## Effects and recovery
+
+[Deployment records](../src/state.rs) keep keyed fingerprints for each resolved destination and locator independently of the Git revision and script cache. A repository-scoped edit session coordinates `apply` and ordinary `absorb`. Each replacement invalidates its previous record before publishing and confirms the new record from the publication outcome. A missing record leaves existing differing bytes protected. The session ends before scripts run.
 
 Tuckin decides **which** file positions to manage, **what** bytes to write, and **under what condition**. Pulith owns local type observations, opened files, staging and replacement, digest admission, and private access on the staged file. A sealed write asks for a private staging operation before plaintext is written. Tuckin reports unavailable platform support during planning when it can identify it, and requests protection repair if a target already agrees by byte.
 

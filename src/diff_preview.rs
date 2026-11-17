@@ -11,17 +11,24 @@ const OUTPUT_LINES: usize = 24;
 pub(crate) const WIDTH: usize = 76;
 const CONTEXT: usize = 2;
 
-pub(crate) fn preview(item: &Item, before: Option<&[u8]>) -> String {
-    if !item.verdict.needs_write() {
+pub(crate) fn preview(item: &Item) -> String {
+    if !item.verdict().pending() {
         return String::new();
     }
-    let verdict = item.verdict.word();
+    let verdict = item.verdict().word();
     let mut text = format!("{verdict} {}\n", path(&item.spell, WIDTH - verdict.len() - 1));
+    if let crate::plan::Action::Blocked(blocker) = item.action {
+        let _ = writeln!(text, "  {}", blocker.conflict.description());
+    }
+    if item.verdict() == Verdict::Repair {
+        text.push_str("  owner-only access repair\n");
+        return text;
+    }
     if item.sealed {
         text.push_str("  sealed content omitted\n");
         return text;
     }
-    let before = match (item.verdict, before) {
+    let before = match (item.verdict(), item.before.as_deref()) {
         (Verdict::Create, _) => &[][..],
         (_, Some(bytes)) => bytes,
         _ => return omitted(text, "input too large"),

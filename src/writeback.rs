@@ -29,6 +29,7 @@ use crate::patch;
 use crate::scan::{Entry, Repo, read_source, repository_entry, repository_kind};
 use crate::seal::{Recipients, Vault};
 use crate::spell::{self, Platform, SlashText, Spell};
+use crate::state::{self, State};
 
 mod secrets;
 
@@ -238,13 +239,15 @@ pub fn absorb(root: &Path, selectors: &[String]) -> Result<String, Error> {
     let (repo, vault, identity) = Repo::scan_for(root)?;
     let entries = repo.select_entries(selectors)?;
     let positions = repo.placements([], &identity)?;
-    let mut pending: Vec<Pending> = Vec::new();
+    let mut edit = State::edit(root)?;
+    let mut pending = Vec::new();
     let mut unresealed = String::new();
     for entry in entries {
         if let Some(write) = collected(
             root,
             entry,
             &positions[entry.spell.as_str()],
+            edit.observe(),
             &vault,
             repo.recipients.as_ref(),
             &mut unresealed,
@@ -252,25 +255,64 @@ pub fn absorb(root: &Path, selectors: &[String]) -> Result<String, Error> {
             pending.push(write);
         }
     }
-    Pending::commit_all(root, &pending, RepositoryWrite::Absorb)?;
-    let mut text: String = pending.iter().map(Pending::line).collect();
+    let mut text = String::new();
+    let mut written = 0;
+    for item in pending {
+        let result = (|| {
+            if let Some(write) = item.write.as_ref() {
+                edit.forget(item.position)?;
+                write.publish(root)?;
+                text.push_str(&write.line());
+                written += 1;
+            }
+            edit.confirm(item.position, &item.record)
+        })();
+        if let Err(cause) = result {
+            let spell = item.write.map_or_else(|| item.position.slash(), |write| write.spell);
+            return Err(Error::RepositoryWriteStopped {
+                cause: Box::new(cause),
+                operation: RepositoryWrite::Absorb,
+                written,
+                spell,
+            });
+        }
+    }
     text.push_str(&unresealed);
-    text.push_str(&format!("updated\t{}\n", pending.len()));
+    text.push_str(&format!("updated\t{written}\n"));
     Ok(text)
+}
+
+struct Collected<'a> {
+    position: &'a Path,
+    write: Option<Pending>,
+    record: state::Record,
+}
+
+fn agreed(
+    record: &mut state::Record,
+    file: &state::File<'_>,
+    selector: Option<&patch::Selector>,
+    bytes: &[u8],
+) {
+    let slot = state::slot(selector);
+    if let Some(tag) = file.fingerprint(&slot, bytes) {
+        record.insert(slot, tag);
+    }
 }
 
 /// One entry's collection, or `None` when there is nothing to collect.
 ///
 /// The order is the plan's: shape first, then the target. A source that does not parse is the
 /// source's problem, and it is reported before anything is read from the target.
-fn collected(
+fn collected<'a>(
     root: &Path,
     entry: &Entry,
-    position: &Path,
+    position: &'a Path,
+    state: &State,
     vault: &Vault,
     recipients: Option<&Recipients>,
     unresealed: &mut String,
-) -> Result<Option<Pending>, Error> {
+) -> Result<Option<Collected<'a>>, Error> {
     let source = read_source(root, &entry.spell)?;
     let layout = content::source_layout(&entry.spell, &source)?;
     if matches!(&layout, SourceLayout::Sealed(site, _) if site.body.is_empty()) {
@@ -302,26 +344,39 @@ fn collected(
         return Ok(None);
     };
     let target = read_opened(&mut file, &entry.target, "target file")?;
+    let file = state.file(position);
+    let mut record = state::Record::default();
     let bytes = match layout {
-        SourceLayout::Plain => content::literal_source(&entry.spell, target)?,
+        SourceLayout::Plain => {
+            agreed(&mut record, &file, None, &target);
+            Some(content::literal_source(&entry.spell, target)?)
+        }
         SourceLayout::Sealed(site, span) => {
-            let Some(body) =
-                changed_seal(&entry.spell, vault, recipients, site.seal, &site.body, &target)?
-            else {
-                return Ok(None);
-            };
-            let mut result = Vec::with_capacity(source.len());
-            result.extend_from_slice(&source[..span.start]);
-            result.extend_from_slice(body.as_bytes());
-            result.extend_from_slice(&source[span.end..]);
-            result
+            agreed(&mut record, &file, None, &target);
+            match changed_seal(&entry.spell, vault, recipients, site.seal, &site.body, &target)? {
+                Some(body) => {
+                    let mut result = Vec::with_capacity(source.len());
+                    result.extend_from_slice(&source[..span.start]);
+                    result.extend_from_slice(body.as_bytes());
+                    result.extend_from_slice(&source[span.end..]);
+                    Some(result)
+                }
+                None => None,
+            }
         }
         SourceLayout::Patch(blocks) => {
-            collect_patch(&entry.spell, &source, &blocks, &target, vault, recipients)?
+            let (bytes, captured) =
+                collect_patch(&entry.spell, &source, &blocks, &target, vault, recipients, &file)?;
+            record = captured;
+            Some(bytes)
         }
         SourceLayout::Template => unreachable!("handled before reading the target"),
     };
-    Ok((bytes != source).then(|| Pending::recaptured(&entry.spell, bytes, &source)))
+    record.validate()?;
+    let write = bytes
+        .filter(|bytes| *bytes != source)
+        .map(|bytes| Pending::recaptured(&entry.spell, bytes, &source));
+    Ok(Some(Collected { position, write, record }))
 }
 
 fn collect_patch(
@@ -331,7 +386,8 @@ fn collect_patch(
     target: &[u8],
     vault: &Vault,
     recipients: Option<&Recipients>,
-) -> Result<Vec<u8>, Error> {
+    file: &state::File<'_>,
+) -> Result<(Vec<u8>, state::Record), Error> {
     if let Some(patch) = blocks.iter().find(|patch| !patch.writable) {
         return Err(content::collection_error(
             spell,
@@ -340,11 +396,15 @@ fn collect_patch(
     }
     let ranges =
         patch::collect_ranges(spell, blocks.iter().map(|patch| &patch.block), target, &[])?;
+    let mut record = state::Record::default();
     let mut output = Vec::with_capacity(source.len());
     let mut cursor = 0;
     for (patch, range) in blocks.iter().zip(&ranges) {
         let SourceBlock { block, span, .. } = patch;
         let value = &target[range.clone()];
+        if block.seal.is_none() || !block.body.is_empty() {
+            agreed(&mut record, file, Some(&block.selector), value);
+        }
         output.extend_from_slice(&source[cursor..span.start]);
         if let Some(seal) = block.seal {
             if !block.body.is_empty()
@@ -365,7 +425,7 @@ fn collect_patch(
     }
     output.extend_from_slice(&source[cursor..]);
     if output == source {
-        return Ok(output);
+        return Ok((output, record));
     }
     let Ok(SourceLayout::Patch(readback)) = content::source_layout(spell, &output) else {
         return Err(body_encoding(spell));
@@ -381,7 +441,7 @@ fn collect_patch(
     {
         return Err(body_encoding(spell));
     }
-    Ok(output)
+    Ok((output, record))
 }
 
 fn changed_seal(

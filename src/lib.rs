@@ -20,6 +20,7 @@ pub mod scan;
 pub mod scripts;
 pub mod seal;
 pub mod spell;
+mod state;
 pub mod writeback;
 
 use std::env;
@@ -41,14 +42,11 @@ pub enum Cmd {
     Edit { paths: Vec<String>, seals: Option<SealAction> },
     Diff { paths: Vec<String>, patch: bool },
     Status { paths: Vec<String> },
-    Apply { paths: Vec<String>, no_scripts: bool },
+    Apply { paths: Vec<String>, no_scripts: bool, overwrite: bool, list: bool, patch: bool },
     Absorb { paths: Vec<String>, seals: Option<SealAction> },
 }
 
-/// Entry point used by `main`. Returns the process exit code: 0, 1 or 2 only.
-///
-/// Commands arrive one at a time. Every command prints only after its whole body succeeded, so
-/// a failed run never shows a partial answer that could be read as the run's conclusion.
+/// Entry point used by the CLI. Results go to stdout and diagnostics to stderr.
 pub fn run(cmd: Cmd) -> Result<ExitCode, Error> {
     match cmd {
         Cmd::Diff { paths, patch } => diff(&paths, patch),
@@ -62,7 +60,9 @@ pub fn run(cmd: Cmd) -> Result<ExitCode, Error> {
             }
             None => edit::edit(root, &paths),
         }),
-        Cmd::Apply { paths, no_scripts } => apply(&paths, no_scripts),
+        Cmd::Apply { paths, no_scripts, overwrite, list, patch } => {
+            apply(&paths, no_scripts, overwrite, list, patch)
+        }
         Cmd::Absorb { paths, seals } => written(|root| match seals {
             Some(action) => {
                 writeback::change_seals(root, &paths, action, writeback::SealInput::Target)
@@ -90,11 +90,7 @@ where
     Ok(ExitCode::SUCCESS)
 }
 
-/// `diff`: one plan, the rows that need a write, exit 1 if there is at least one.
-///
-/// The exit code is not computed from a count kept beside the text — it is computed from the same
-/// predicate the text is filtered by (`Verdict::needs_write`), so "exit 1" and "the table has a
-/// row" cannot disagree.
+/// Reports differences from the shared plan, including entries blocked from publication.
 fn diff(selectors: &[String], patch: bool) -> Result<ExitCode, Error> {
     if patch && selectors.len() != 1 {
         return Err(Error::bare("--patch requires one exact repository file"));
@@ -122,66 +118,127 @@ fn diff_with(
     display: fn(&[plan::Item]) -> String,
 ) -> Result<(String, bool), Error> {
     let (repo, vault, identity) = scan::Repo::scan_for(root)?;
+    let state = state::State::observe(&repo.root);
     let (plan, _) = repo.selected_plan_with(
         selectors,
         &repo.renderer()?,
         &vault,
         &identity,
-        plan::Purpose::Observe,
+        plan::PlanOptions::observe(&state),
     )?;
-    let pending = plan.iter().any(|item| item.verdict.needs_write());
+    let pending = plan.iter().any(|item| item.verdict().pending());
     Ok((display(&plan), pending))
 }
 
 fn diff_patch_at(root: &Path, path: &str) -> Result<(String, bool), Error> {
     let (repo, vault, identity) = scan::Repo::scan_for(root)?;
-    let (item, before) = repo.preview(path, &vault, &identity)?;
-    let pending = item.verdict.needs_write();
-    Ok((diff_preview::preview(&item, before.as_deref()), pending))
+    let item = repo.preview(path, &vault, &identity)?;
+    let pending = item.verdict().pending();
+    Ok((diff_preview::preview(&item), pending))
 }
 
-/// `apply`: writes the items the plan says need writing, then reports what happened.
-fn apply(selectors: &[String], no_scripts: bool) -> Result<ExitCode, Error> {
-    let root = repo_root()?;
-    print!("{}", apply_at(&root, selectors, no_scripts)?);
+#[derive(Debug, Clone, Copy)]
+enum ApplyOutput {
+    Counts,
+    Terminal,
+    List,
+    Patch,
+}
+
+impl ApplyOutput {
+    fn render(self, written: &commit::Written, plan: &[plan::Item]) -> String {
+        match self {
+            Self::Counts => written.summary(),
+            Self::Terminal => written.terminal(),
+            Self::List => written.list(),
+            Self::Patch if written.paths.is_empty() => String::new(),
+            Self::Patch => diff_preview::preview(&plan[0]),
+        }
+    }
+}
+
+fn apply(
+    selectors: &[String],
+    no_scripts: bool,
+    overwrite: bool,
+    list: bool,
+    patch: bool,
+) -> Result<ExitCode, Error> {
+    let output = if patch {
+        ApplyOutput::Patch
+    } else if list {
+        ApplyOutput::List
+    } else if io::stdout().is_terminal() {
+        ApplyOutput::Terminal
+    } else {
+        ApplyOutput::Counts
+    };
+    print!("{}", apply_with(&repo_root()?, selectors, no_scripts, overwrite, output)?);
     Ok(ExitCode::SUCCESS)
 }
 
-/// The body of `apply` with both side channels removed: same plan as `diff` and `status`, then
-/// the commit phase, then the script phase, then the counts as text.
-///
-/// The phases are ordered by what they are allowed to see, not by convenience: the file plan,
-/// the script table and the cache plan are built before deployment. The runnable products are
-/// staged before the file phase, and only then may a script run
-/// — a convergence script is allowed to act on what was just deployed.
-///
-/// The cache decides which `gate-*` scripts are *not* run. It is consulted here, not inside the
-/// script phase, so that "run every script" remains one call with one list and the cache never
-/// becomes a second verdict. It is updated only after the whole script phase succeeded.
-///
-/// `no_scripts` does not filter the table, it skips the phase: `scripts/` is not even read. A
-/// script and a file have no containment relation, so `[PATH]` cannot narrow this away either.
+/// Deploys selected entries and reports the machine-readable counts.
 pub fn apply_at(root: &Path, selectors: &[String], no_scripts: bool) -> Result<String, Error> {
-    let (repo, vault, identity) = scan::Repo::scan_for(root)?;
-    let renderer = repo.renderer()?;
-    let (plan, _) =
-        repo.selected_plan_with(selectors, &renderer, &vault, &identity, plan::Purpose::Apply)?;
-    if no_scripts {
-        return Ok(commit::Written::from_plan(&plan)?.summary());
+    apply_with(root, selectors, no_scripts, false, ApplyOutput::Counts)
+}
+
+fn apply_with(
+    root: &Path,
+    selectors: &[String],
+    no_scripts: bool,
+    overwrite: bool,
+    output: ApplyOutput,
+) -> Result<String, Error> {
+    let preview = matches!(output, ApplyOutput::Patch);
+    if (preview && selectors.len() != 1) || (overwrite && selectors.is_empty()) {
+        return Err(Error::bare("this option requires exact repository files"));
     }
-    let scripts = repo.scripts_using(&renderer)?;
+
+    let (repo, vault, identity) = scan::Repo::scan_for(root)?;
+    let mut edit = state::State::edit(&repo.root)?;
+    let renderer = repo.renderer()?;
+    let options = plan::PlanOptions { state: edit.observe(), overwrite, preview, confirm: true };
+    let (plan, _) = repo.selected_plan_with(selectors, &renderer, &vault, &identity, options)?;
+    if let Some(blocked) = out::blocked(&plan) {
+        return Err(blocked);
+    }
+
+    let scripts = if no_scripts { Vec::new() } else { repo.scripts_using(&renderer)? };
     let gate = gate::plan(root, &scripts);
     let runnable: Vec<_> = scripts.iter().filter(|script| !gate.hits(&script.spell)).collect();
     let commands = scripts::resolve(&runnable)?;
     let stage = scripts::stage(&runnable)?;
-    let written = commit::Written::from_plan(&plan)?;
-    scripts::run(&repo.root, &commands, stage.as_ref()).map_err(|cause| Error::ApplyStopped {
-        cause: Box::new(cause),
-        files_written: written.created + written.overwritten,
-        phase: diag::ApplyPhase::Scripts,
+    let mut written = commit::Written::default();
+    if let Err(cause) = written.publish(&plan, &mut edit) {
+        return Err(apply_stopped(cause, &written, &plan, output, diag::ApplyPhase::Files));
+    }
+    drop(edit);
+
+    scripts::run(&repo.root, &commands, stage.as_ref()).map_err(|cause| {
+        apply_stopped(cause, &written, &plan, output, diag::ApplyPhase::Scripts)
     })?;
     gate.record(&runnable);
-    Ok(written.summary())
+    Ok(output.render(&written, &plan))
+}
+
+fn apply_stopped(
+    cause: Error,
+    written: &commit::Written,
+    plan: &[plan::Item],
+    output: ApplyOutput,
+    phase: diag::ApplyPhase,
+) -> Error {
+    let details = match output {
+        _ if written.paths.is_empty() => String::new(),
+        ApplyOutput::Counts | ApplyOutput::Terminal => written.terminal(),
+        ApplyOutput::List | ApplyOutput::Patch => output.render(written, plan),
+    };
+    Error::ApplyStopped {
+        cause: Box::new(cause),
+        files_written: written.paths.len(),
+        phase,
+        details,
+    }
 }
 
 /// `status`: plan the selected entries and report their neighbours. The exit code does not depend on what the
@@ -195,12 +252,13 @@ fn status(selectors: &[String]) -> Result<ExitCode, Error> {
 /// Reports selected files and their unclaimed neighbours.
 pub fn status_at(root: &Path, selectors: &[String]) -> Result<String, Error> {
     let (repo, vault, identity) = scan::Repo::scan_for(root)?;
+    let state = state::State::observe(&repo.root);
     let (plan, placements) = repo.selected_plan_with(
         selectors,
         &repo.renderer()?,
         &vault,
         &identity,
-        plan::Purpose::Observe,
+        plan::PlanOptions::observe(&state),
     )?;
     let undeclared = plan::undeclared(&plan, &placements)?;
     Ok(out::status(&plan, &undeclared, repo.ignored))

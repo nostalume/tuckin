@@ -25,7 +25,7 @@
           archive = release.archives.${system};
           linux = pkgs.stdenv.hostPlatform.isLinux;
         in rec {
-          default = binary;
+          default = if release.version == manifest.package.version then binary else source;
           binary = pkgs.stdenv.mkDerivation {
             pname = "tuckin-bin";
             inherit (release) version;

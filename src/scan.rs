@@ -237,6 +237,7 @@ impl Repo {
     ) -> Result<Placements<'a>, Error> {
         let pairs = self.entries.iter().map(|e| (e.spell.as_str(), e.target.as_str()));
         let pairs = pairs.chain(added);
+        let state = crate::state::directory().map(|path| folded_path(&path));
         let mut resolved_parents = HashMap::new();
         let mut targets = Vec::new();
         let mut seen = HashMap::new();
@@ -257,6 +258,14 @@ impl Repo {
             let actual = directory.join(name);
             let place = folded_path(&actual);
             identity.check_target(spell, &place, path)?;
+            if state
+                .as_ref()
+                .is_some_and(|state| place.starts_with(state) || state.starts_with(&place))
+            {
+                return Err(
+                    target_conflict(spell, &actual, "it overlaps local deployment state").into()
+                );
+            }
             if place.starts_with(&identity.repo) {
                 return Err(target_conflict(
                     spell,

@@ -1,7 +1,8 @@
 //! The selected entries are rendered before targets are read.
 //!
-//! A plan keeps the expected bytes for publication and the observed digest for a patch write.
+//! One verdict determines what to report and which publication condition to use.
 
+use std::cell::OnceCell;
 use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
@@ -18,58 +19,96 @@ use crate::patch::{self, Payload};
 use crate::scan::{Entry, Placements, Repo, check_source_parent};
 use crate::seal::{self, IdentityLocation, Vault};
 use crate::spell::{self, SlashText};
+use crate::state::{self, Record, State};
 
 pub use crate::files::OtherKind;
 
-/// A verdict: whether the entry needs a byte written, and why not. An occupied position is not a
-/// verdict but a refusal (`E-T1`).
+/// What a plan reports. Publication conditions live on the action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Create,
     Overwrite,
+    Repair,
+    Blocked,
     Skip,
 }
 
 impl Verdict {
-    /// The two verdicts that require a byte to be written. Defined once, on the verdict,
-    /// because three consumers ask the same question — `diff` prints these rows, `diff` exits 1
-    /// when any exists, `apply` writes these and counts the rest. One definition, three readers;
-    /// no command derives the judgement again.
-    pub fn needs_write(self) -> bool {
-        matches!(self, Verdict::Create | Verdict::Overwrite)
+    pub fn pending(self) -> bool {
+        self != Self::Skip
     }
 }
 
-/// An enumerated reason, never free text. v0.1 has exactly one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reason {
-    /// Expected bytes and target bytes are identical, byte for byte.
-    Unchanged,
+pub(crate) enum Conflict {
+    Local,
+    Diverged,
+    Unverified,
 }
 
-/// One plan item. `spell` and `target` are copied from the entry so that a plan can be handed
-/// around without the repository; `expected` is the bytes to write.
-///
-/// `sealed` is the syntactic predicate of §5.4, carried from the tree: it decides the write's
-/// permissions, not a value that merely looks like a secret. `expected` is always plaintext —
-/// a sealed target's protection lives in the source, and only the commit phase knows the mode.
+impl Conflict {
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Local => "locally modified",
+            Self::Diverged => "local and repository contents differ from the saved record",
+            Self::Unverified => "existing content has no deployment record",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Blocker {
+    pub(crate) conflict: Conflict,
+    pub(crate) block: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Action {
+    Keep,
+    Blocked(Blocker),
+    Create,
+    Replace { basis: DigestValue, repair: bool },
+}
+
+/// The candidate bytes serve both publication and preview. Only admitted actions carry a
+/// publication condition, and a sealed candidate is always redacted in the preview.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub spell: String,
     pub target: String,
     pub form: Form,
-    pub verdict: Verdict,
-    pub reason: Option<Reason>,
     pub expected: Vec<u8>,
     pub sealed: bool,
-    pub(crate) basis: Option<DigestValue>,
+    pub(crate) action: Action,
     pub(crate) position: PathBuf,
+    pub(crate) record: Option<Record>,
+    pub(crate) before: Option<Vec<u8>>,
 }
 
-pub(crate) enum Purpose<'a> {
-    Observe,
-    Apply,
-    Preview(&'a mut Option<Vec<u8>>),
+impl Item {
+    pub fn verdict(&self) -> Verdict {
+        match self.action {
+            Action::Keep => Verdict::Skip,
+            Action::Blocked(_) => Verdict::Blocked,
+            Action::Create => Verdict::Create,
+            Action::Replace { repair: true, .. } => Verdict::Repair,
+            Action::Replace { .. } => Verdict::Overwrite,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PlanOptions<'a> {
+    pub(crate) state: &'a State,
+    pub(crate) overwrite: bool,
+    pub(crate) preview: bool,
+    pub(crate) confirm: bool,
+}
+
+impl<'a> PlanOptions<'a> {
+    pub(crate) fn observe(state: &'a State) -> Self {
+        Self { state, overwrite: false, preview: false, confirm: false }
+    }
 }
 
 impl Repo {
@@ -80,8 +119,14 @@ impl Repo {
 
     fn plan_with(&self, vault: &Vault) -> Result<Vec<Item>, Error> {
         let identity = vault.check_location(&self.root)?;
-        let (plan, _) =
-            self.selected_plan_with(&[], &self.renderer()?, vault, &identity, Purpose::Observe)?;
+        let state = State::observe(&self.root);
+        let (plan, _) = self.selected_plan_with(
+            &[],
+            &self.renderer()?,
+            vault,
+            &identity,
+            PlanOptions::observe(&state),
+        )?;
         Ok(plan)
     }
 
@@ -96,14 +141,14 @@ impl Repo {
         placements: &Placements<'_>,
         renderer: &content::Renderer,
         vault: &Vault,
-        mut purpose: Purpose<'_>,
+        options: PlanOptions<'_>,
     ) -> Result<Vec<Item>, Error> {
         let mut found: Vec<_> = entries.iter().map(|_| Vec::new()).collect();
         let rendered = self.render_all(entries, renderer, &mut found)?;
         let mut items = Vec::with_capacity(entries.len());
         for ((entry, rendered), diags) in entries.iter().zip(rendered).zip(&mut found) {
             let Some(rendered) = rendered else { continue };
-            match judge(entry, &placements[entry.spell.as_str()], rendered, vault, &mut purpose) {
+            match judge(entry, &placements[entry.spell.as_str()], rendered, vault, options) {
                 Ok(item) => items.push(item),
                 Err(error) => diags.extend(error.into_diags()?),
             }
@@ -146,12 +191,13 @@ impl Repo {
     pub fn selected_plan(&self, selectors: &[String]) -> Result<Vec<Item>, Error> {
         let vault = self.vault();
         let identity = vault.check_location(&self.root)?;
+        let state = State::observe(&self.root);
         let (plan, _) = self.selected_plan_with(
             selectors,
             &self.renderer()?,
             &vault,
             &identity,
-            Purpose::Observe,
+            PlanOptions::observe(&state),
         )?;
         Ok(plan)
     }
@@ -162,12 +208,25 @@ impl Repo {
         renderer: &content::Renderer,
         vault: &Vault,
         identity: &IdentityLocation,
-        purpose: Purpose<'_>,
+        options: PlanOptions<'_>,
     ) -> Result<(Vec<Item>, Placements<'_>), Error> {
-        let entries = self.select_entries(selectors)?;
+        let entries = if options.overwrite || options.preview {
+            self.exact_entries(selectors)?
+        } else {
+            self.select_entries(selectors)?
+        };
         let placements = self.placements([], identity)?;
-        let plan = self.build_plan(&entries, &placements, renderer, vault, purpose)?;
+        let plan = self.build_plan(&entries, &placements, renderer, vault, options)?;
         Ok((plan, placements))
+    }
+
+    pub(crate) fn exact_entries(&self, selectors: &[String]) -> Result<Vec<&Entry>, Error> {
+        let canonical = spell::canon(selectors)?;
+        let entries = self.select_entries(selectors)?;
+        if canonical.iter().any(|path| !entries.iter().any(|entry| &entry.spell == path)) {
+            return Err(Error::bare("this option requires exact repository files"));
+        }
+        Ok(entries)
     }
 
     pub(crate) fn preview(
@@ -175,32 +234,27 @@ impl Repo {
         path: &str,
         vault: &Vault,
         identity: &IdentityLocation,
-    ) -> Result<(Item, Option<Vec<u8>>), Error> {
-        let selectors = spell::canon(&[path.to_string()])?;
-        let entry =
-            self.entries.iter().find(|entry| entry.spell == selectors[0]).ok_or_else(|| {
-                Error::bare("--patch requires one exact repository file; use diff PATH to list it")
-            })?;
-        let placements = self.placements([], identity)?;
-        let mut before = None;
-        let mut plan = self.build_plan(
-            &[entry],
-            &placements,
+    ) -> Result<Item, Error> {
+        let state = State::observe(&self.root);
+        let options = PlanOptions { preview: true, ..PlanOptions::observe(&state) };
+        let (mut items, _) = self.selected_plan_with(
+            &[path.to_owned()],
             &self.renderer()?,
             vault,
-            Purpose::Preview(&mut before),
+            identity,
+            options,
         )?;
-        Ok((plan.pop().expect("one selected entry was evaluated"), before))
+        Ok(items.pop().expect("one selected entry was evaluated"))
     }
 }
 
-/// Observes the target once and derives publication or preview data from the same bytes.
+/// One observation provides the range comparison, predecessor and optional preview.
 fn judge(
     entry: &Entry,
     position: &Path,
     rendered: Rendered,
     vault: &Vault,
-    purpose: &mut Purpose<'_>,
+    options: PlanOptions<'_>,
 ) -> Result<Item, Error> {
     let form = rendered.form();
     let sealed = rendered.sealed();
@@ -219,10 +273,20 @@ fn judge(
         Rendered::Sealed(site) => Rendered::Whole(open_site(&entry.spell, &site, vault)?),
         other => other,
     };
-    let mut basis = None;
-    let (verdict, reason, expected) = match open_regular(position, &entry.spell, "target file")? {
+    let mut ranges = Comparison {
+        file: options.state.file(position),
+        previous: OnceCell::new(),
+        next: options.confirm.then(Record::default),
+        blocked: None,
+        overwrite: options.overwrite,
+    };
+
+    let (action, expected, before) = match open_regular(position, &entry.spell, "target file")? {
         None => match rendered {
-            Rendered::Whole(bytes) => (Verdict::Create, None, bytes),
+            Rendered::Whole(bytes) => {
+                ranges.compare(None, None, &bytes);
+                (Action::Create, bytes, None)
+            }
             Rendered::Sealed(_) => unreachable!("opened above"),
             Rendered::Patch(blocks) => {
                 return Err(patch::missing_target(&entry.spell, &entry.target, &blocks).into());
@@ -231,45 +295,89 @@ fn judge(
         Some(mut file) => {
             let current = read_opened(&mut file, &entry.target, "target file")?;
             let expected = match rendered {
-                Rendered::Whole(bytes) => bytes,
+                Rendered::Whole(bytes) => {
+                    ranges.compare(None, Some(&current), &bytes);
+                    bytes
+                }
                 Rendered::Sealed(_) => unreachable!("opened above"),
-                Rendered::Patch(blocks) => {
-                    patch::patched_bytes(&entry.spell, &blocks, &current, |block| {
-                        open_block(&entry.spell, block, vault)
-                    })?
-                }
+                Rendered::Patch(blocks) => patch::patched_bytes(
+                    &entry.spell,
+                    &blocks,
+                    &current,
+                    |block| open_block(&entry.spell, block, vault),
+                    |block, current, expected| ranges.compare(Some(block), current, expected),
+                )?,
             };
-            if current == expected && (!sealed || owner_only(&file, entry)?) {
-                (Verdict::Skip, Some(Reason::Unchanged), expected)
+            let same = current == expected;
+            let action = if let Some(blocker) = ranges.blocked {
+                Action::Blocked(blocker)
+            } else if same && (!sealed || owner_only(&file, entry)?) {
+                Action::Keep
             } else {
-                match purpose {
-                    Purpose::Apply if form == Form::Patch => {
-                        basis = Some(DigestValue::sha256(&current));
-                    }
-                    Purpose::Preview(before)
-                        if !sealed
-                            && current.len() <= crate::diff_preview::INPUT_BYTES
-                            && expected.len() <= crate::diff_preview::INPUT_BYTES =>
-                    {
-                        **before = Some(current);
-                    }
-                    _ => {}
-                }
-                (Verdict::Overwrite, None, expected)
-            }
+                Action::Replace { basis: DigestValue::sha256(&current), repair: same }
+            };
+            let before = (options.preview
+                && !sealed
+                && !same
+                && current.len() <= crate::diff_preview::INPUT_BYTES
+                && expected.len() <= crate::diff_preview::INPUT_BYTES)
+                .then_some(current);
+            (action, expected, before)
         }
     };
+    if let Some(record) = &ranges.next {
+        record.validate()?;
+    }
     Ok(Item {
         spell: entry.spell.clone(),
         target: entry.target.clone(),
         form,
-        verdict,
-        reason,
+        action,
         expected,
         sealed,
-        basis,
         position: position.to_path_buf(),
+        record: ranges.next,
+        before,
     })
+}
+
+struct Comparison<'a> {
+    file: state::File<'a>,
+    previous: OnceCell<Record>,
+    next: Option<Record>,
+    blocked: Option<Blocker>,
+    overwrite: bool,
+}
+
+impl Comparison<'_> {
+    fn compare(&mut self, block: Option<&content::Block>, current: Option<&[u8]>, expected: &[u8]) {
+        let replacement = current.filter(|bytes| *bytes != expected);
+        let check = replacement.is_some() && !self.overwrite && self.blocked.is_none();
+        if self.next.is_none() && !check {
+            return;
+        }
+        let slot = state::slot(block.map(|block| &block.selector));
+        let wanted = self.file.fingerprint(&slot, expected);
+        if let Some((record, value)) = self.next.as_mut().zip(wanted) {
+            record.insert(slot, value);
+        }
+        if let Some(current) = replacement.filter(|_| check) {
+            let previous = self.previous.get_or_init(|| self.file.record());
+            let known = self
+                .file
+                .fingerprint(&slot, current)
+                .and_then(|current| previous.matches(&slot, &current));
+            let conflict = match known {
+                Some(true) => return,
+                None => Conflict::Unverified,
+                Some(false) if wanted.and_then(|v| previous.matches(&slot, &v)) == Some(true) => {
+                    Conflict::Local
+                }
+                Some(false) => Conflict::Diverged,
+            };
+            self.blocked = Some(Blocker { conflict, block: block.map(|block| block.index) });
+        }
+    }
 }
 
 fn owner_only(file: &OpenedFile, entry: &Entry) -> Result<bool, Error> {
@@ -435,18 +543,16 @@ mod tests {
         let f = fixture();
         let plan = plan_of(&f);
         assert_eq!(plan.len(), 1);
-        assert_eq!(plan[0].verdict, Verdict::Create);
-        assert_eq!(plan[0].reason, None);
+        assert_eq!(plan[0].verdict(), Verdict::Create);
         assert_eq!(plan[0].expected, b"from repo");
     }
 
     #[test]
-    fn different_bytes_become_overwrite() {
+    fn existing_unverified_bytes_are_blocked() {
         let f = fixture();
         fs::write(f.target.path().join("a.txt"), "stale").unwrap();
         let plan = plan_of(&f);
-        assert_eq!(plan[0].verdict, Verdict::Overwrite);
-        assert_eq!(plan[0].reason, None);
+        assert_eq!(plan[0].verdict(), Verdict::Blocked);
     }
 
     #[cfg(unix)]
@@ -470,8 +576,7 @@ mod tests {
         let f = fixture();
         fs::write(f.target.path().join("a.txt"), "from repo").unwrap();
         let plan = plan_of(&f);
-        assert_eq!(plan[0].verdict, Verdict::Skip);
-        assert_eq!(plan[0].reason, Some(Reason::Unchanged));
+        assert_eq!(plan[0].verdict(), Verdict::Skip);
     }
 
     #[test]
@@ -513,7 +618,7 @@ mod tests {
         let before_mtime = fs::metadata(&target).unwrap().modified().unwrap();
 
         let plan = plan_of(&f);
-        assert_eq!(plan[0].verdict, Verdict::Overwrite);
+        assert_eq!(plan[0].verdict(), Verdict::Blocked);
 
         assert_eq!(fs::read(&target).unwrap(), before_bytes);
         assert_eq!(fs::metadata(&target).unwrap().modified().unwrap(), before_mtime);
@@ -544,7 +649,7 @@ mod tests {
         let f = fixture();
         // Nothing was deployed yet: the parent of the target does not exist.
         let plan = plan_of(&f);
-        assert_eq!(plan[0].verdict, Verdict::Create);
+        assert_eq!(plan[0].verdict(), Verdict::Create);
         let (repo, _, identity) = Repo::scan_for(f.repo.path()).unwrap();
         let placements = repo.placements([], &identity).unwrap();
         assert!(undeclared(&plan, &placements).unwrap().is_empty());
@@ -606,7 +711,7 @@ mod tests {
         fs::write(f.target.path().join("a.txt"), "port: 80\n").unwrap();
         let plan = plan_of(&f);
         assert_eq!(plan[0].form, Form::Patch);
-        assert_eq!(plan[0].verdict, Verdict::Overwrite);
+        assert_eq!(plan[0].verdict(), Verdict::Blocked);
         assert_eq!(plan[0].expected, b"port: 8080\n");
     }
 
@@ -618,8 +723,7 @@ mod tests {
         );
         fs::write(f.target.path().join("a.txt"), "port: 8080\n").unwrap();
         let plan = plan_of(&f);
-        assert_eq!(plan[0].verdict, Verdict::Skip);
-        assert_eq!(plan[0].reason, Some(Reason::Unchanged));
+        assert_eq!(plan[0].verdict(), Verdict::Skip);
     }
 
     #[test]
@@ -711,7 +815,7 @@ mod tests {
         let f = fixture_with("[data]\nname = \"world\"\n", &[("home/a.txt", "hello {{name}}")]);
         fs::write(f.target.path().join("a.txt"), "hello world").unwrap();
         let plan = plan_of(&f);
-        assert_eq!(plan[0].verdict, Verdict::Skip);
+        assert_eq!(plan[0].verdict(), Verdict::Skip);
     }
 
     #[test]
@@ -759,7 +863,7 @@ mod tests {
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].form, Form::Whole);
         assert!(plan[0].sealed);
-        assert_eq!(plan[0].verdict, Verdict::Create);
+        assert_eq!(plan[0].verdict(), Verdict::Create);
         assert_eq!(plan[0].expected, b"secret\n");
     }
 
@@ -775,8 +879,7 @@ mod tests {
         fs::set_permissions(f.target.path().join("a.txt"), fs::Permissions::from_mode(0o600))
             .unwrap();
         let plan = plan_with_vault(&f, &vault);
-        assert_eq!(plan[0].verdict, Verdict::Skip);
-        assert_eq!(plan[0].reason, Some(Reason::Unchanged));
+        assert_eq!(plan[0].verdict(), Verdict::Skip);
         assert!(plan[0].sealed);
     }
 
@@ -795,7 +898,7 @@ mod tests {
         let plan = plan_with_vault(&f, &vault);
         assert_eq!(plan[0].form, Form::Patch);
         assert!(plan[0].sealed);
-        assert_eq!(plan[0].verdict, Verdict::Overwrite);
+        assert_eq!(plan[0].verdict(), Verdict::Blocked);
         assert_eq!(plan[0].expected, b"H:\nK: new\nV: end\n");
     }
 

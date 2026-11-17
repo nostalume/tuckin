@@ -476,7 +476,7 @@ fn line_patches_replace_and_insert_without_changing_neighboring_bytes() {
         ["{\r\n \t\"size\": 17,\r\n \t\"local\": 42\r\n}\r\n", "{\r\n \t\"local\": 42\r\n}\r\n"]
     {
         fs::write(&target, previous).unwrap();
-        let out = tuckin(f.repo.path(), &["apply", "--no-scripts"]);
+        let out = tuckin(f.repo.path(), &["apply", "--no-scripts", "--overwrite", "home/a.txt"]);
         assert!(out.status.success(), "{out:?}");
         assert_eq!(fs::read(&target).unwrap(), desired);
         let out = tuckin(f.repo.path(), &["diff"]);
@@ -555,17 +555,18 @@ fn a_between_patch_seals_only_its_body() {
     assert_eq!(preview.status.code(), Some(1), "{preview:?}");
     assert!(String::from_utf8_lossy(&preview.stdout).contains("sealed content omitted"));
     assert!(!String::from_utf8_lossy(&preview.stdout).contains("fixture-token"));
-    let apply = tuckin_age(f.repo.path(), &["apply", "--no-scripts"], &env);
+    let apply =
+        tuckin_age(f.repo.path(), &["apply", "--no-scripts", "--overwrite", "home/a.txt"], &env);
     assert!(apply.status.success(), "{apply:?}");
     assert_eq!(fs::read(&target).unwrap(), b"token=\"fixture-token\"\r\nlocal=42\r\n");
     let steady = tuckin_age(f.repo.path(), &["diff"], &env);
     assert!(steady.status.success() && steady.stdout.is_empty(), "{steady:?}");
     fs::write(&target, b"token=\"different-local-token\"\r\nlocal=42\r\n").unwrap();
     let drift = tuckin_age(f.repo.path(), &["apply", "--no-scripts"], &env);
-    assert!(drift.status.success(), "{drift:?}");
+    assert_eq!(drift.status.code(), Some(2), "{drift:?}");
     let stderr = String::from_utf8_lossy(&drift.stderr);
     assert!(!stderr.contains("fixture-token") && !stderr.contains("different-local-token"));
-    assert_eq!(fs::read(&target).unwrap(), b"token=\"fixture-token\"\r\nlocal=42\r\n");
+    assert_eq!(fs::read(&target).unwrap(), b"token=\"different-local-token\"\r\nlocal=42\r\n");
 }
 
 #[test]
@@ -1231,10 +1232,12 @@ fn diff_patch_uses_the_rendered_plan_and_limits_context() {
     fs::write(&path, target).unwrap();
     let out = tuckin(f.repo.path(), &["diff", "--patch", "./home/a.txt"]);
     assert_eq!(out.status.code(), Some(1), "{out:?}");
-    assert_eq!(out.stdout, b"overwrite home/a.txt\n@@ old:2 new:2 @@\n  second\n  third\n- port=80\n+ port=443\n  fifth\n  sixth\n");
+    assert_eq!(out.stdout, b"blocked home/a.txt\n  existing content has no deployment record\n@@ old:2 new:2 @@\n  second\n  third\n- port=80\n+ port=443\n  fifth\n  sixth\n");
     assert_eq!(fs::read(&path).unwrap(), target);
-    let apply = tuckin(f.repo.path(), &["apply", "--no-scripts"]);
+    let apply =
+        tuckin(f.repo.path(), &["apply", "--no-scripts", "--overwrite", "--patch", "home/a.txt"]);
     assert!(apply.status.success(), "{apply:?}");
+    assert_eq!(apply.stdout, b"overwrite home/a.txt\n@@ old:2 new:2 @@\n  second\n  third\n- port=80\n+ port=443\n  fifth\n  sixth\n");
     let out = tuckin(f.repo.path(), &["diff", "--patch", "home/a.txt"]);
     assert!(out.status.success(), "{out:?}");
     assert!(out.stdout.is_empty());
@@ -1282,7 +1285,9 @@ fn diff_patch_reports_binary_and_comparison_limits_without_a_body() {
         assert_eq!(out.status.code(), Some(1), "{out:?}");
         assert_eq!(
             String::from_utf8(out.stdout).unwrap(),
-            format!("overwrite home/a.txt\n  preview omitted ({reason})\n")
+            format!(
+                "blocked home/a.txt\n  existing content has no deployment record\n  preview omitted ({reason})\n"
+            )
         );
     }
 }
@@ -1313,6 +1318,96 @@ fn diff_never_prints_undeclared_rows() {
 }
 
 /// `apply` writes the file and reports four counts of fact on stdout.
+
+#[test]
+fn apply_preserves_local_edits_and_reports_the_selected_publications() {
+    let f = fixture();
+    let source = f.repo.path().join("home/a.txt");
+    let target = f.target.path().join("a.txt");
+    let first = tuckin(f.repo.path(), &["apply", "--no-scripts", "--list"]);
+    assert!(first.status.success(), "{first:?}");
+    assert_eq!(first.stdout, b"create\thome/a.txt\n");
+
+    fs::write(&target, b"local choice").unwrap();
+    fs::write(f.repo.path().join("home/z.txt"), b"new").unwrap();
+    let diff = tuckin(f.repo.path(), &["diff"]);
+    assert_eq!(diff.status.code(), Some(1));
+    assert_eq!(diff.stdout, b"blocked\thome/a.txt\ncreate\thome/z.txt\n");
+    script(f.repo.path(), shell::marker_only());
+    let blocked = tuckin(f.repo.path(), &["apply"]);
+    assert_eq!(blocked.status.code(), Some(2), "{blocked:?}");
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("locally modified"));
+    assert_eq!(fs::read(&target).unwrap(), b"local choice");
+    assert!(!f.target.path().join("z.txt").exists());
+    assert!(!f.repo.path().join("marker.txt").exists());
+
+    let absorbed = tuckin(f.repo.path(), &["absorb", "home/a.txt"]);
+    assert!(absorbed.status.success(), "{absorbed:?}");
+    assert_eq!(fs::read(&source).unwrap(), b"local choice");
+    fs::write(&source, b"repository update").unwrap();
+    let applied = tuckin(f.repo.path(), &["apply", "--no-scripts", "--list"]);
+    assert!(applied.status.success(), "{applied:?}");
+    assert_eq!(applied.stdout, b"overwrite\thome/a.txt\ncreate\thome/z.txt\n");
+    assert_eq!(fs::read(&target).unwrap(), b"repository update");
+}
+
+#[test]
+fn patch_reorder_and_edits_outside_its_ranges_do_not_block_updates() {
+    let f = fixture();
+    let source = f.repo.path().join("home/a.txt");
+    let target = f.target.path().join("a.txt");
+    let theme = r#"{{#patch "line" prefix="theme="}}dark{{/patch}}"#;
+    let zoom = r#"{{#patch "line" prefix="zoom="}}100{{/patch}}"#;
+    fs::write(&source, format!("{theme}\n{zoom}")).unwrap();
+    fs::write(&target, b"theme=dark\nzoom=100\nlocal=on\n").unwrap();
+    let seed = tuckin(f.repo.path(), &["apply", "--no-scripts"]);
+    assert!(seed.status.success(), "{seed:?}");
+
+    fs::write(&source, format!("{zoom}\n{}", theme.replace("dark", "light"))).unwrap();
+    fs::write(&target, b"local=off\nzoom=100\ntheme=dark\n").unwrap();
+    let apply = tuckin(f.repo.path(), &["apply", "--no-scripts"]);
+    assert!(apply.status.success(), "{apply:?}");
+    assert_eq!(fs::read(&target).unwrap(), b"local=off\nzoom=100\ntheme=light\n");
+
+    fs::write(&target, b"local=off\nzoom=125\ntheme=light\n").unwrap();
+    let blocked = tuckin(f.repo.path(), &["apply", "--no-scripts"]);
+    assert_eq!(blocked.status.code(), Some(2), "{blocked:?}");
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("patch block 1"));
+    assert_eq!(fs::read(&target).unwrap(), b"local=off\nzoom=125\ntheme=light\n");
+}
+
+#[test]
+fn losing_the_state_key_leaves_old_records_unverified() {
+    let f = fixture();
+    let first = TempDir::new().unwrap();
+    let run = |state: &TempDir, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_tuckin"))
+            .current_dir(f.repo.path())
+            .env("TUCKIN_STATE_DIR", state.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let seed = run(&first, &["apply", "--no-scripts"]);
+    assert!(seed.status.success(), "{seed:?}");
+    let base = first.path().join("tuckin/deployments-v1");
+    let partition = fs::read_dir(base).unwrap().next().unwrap().unwrap().path();
+    fs::remove_file(partition.join("key")).unwrap();
+    fs::write(f.repo.path().join("home/a.txt"), "update").unwrap();
+    let blocked = run(&first, &["apply", "--no-scripts"]);
+    assert_eq!(blocked.status.code(), Some(2), "{blocked:?}");
+    assert!(
+        String::from_utf8_lossy(&blocked.stderr)
+            .contains("existing content has no deployment record")
+    );
+    let invalid_scope = run(&first, &["apply", "--no-scripts", "--overwrite", "home"]);
+    assert_eq!(invalid_scope.status.code(), Some(2), "{invalid_scope:?}");
+    assert_eq!(fs::read(f.target.path().join("a.txt")).unwrap(), b"a");
+    let apply = run(&first, &["apply", "--no-scripts", "--overwrite", "home/a.txt"]);
+    assert!(apply.status.success(), "{apply:?}");
+    assert_eq!(fs::read(f.target.path().join("a.txt")).unwrap(), b"update");
+}
+
 #[test]
 fn apply_writes_the_file_and_prints_the_counts() {
     let f = fixture();
@@ -1559,6 +1654,7 @@ fn f5_script_failure_keeps_earlier_files() {
     let text = String::from_utf8(out.stderr).unwrap();
     assert_eq!(text.lines().next(), Some(format!("{failing}: exit 3").as_str()));
     assert!(text.contains("file phase complete (1 written)"));
+    assert!(text.lines().any(|line| line.trim() == "created  home/a.txt"));
     assert!(!text.contains("error:"), "a script failure is not an error code: {text:?}");
     assert!(f.repo.path().join("early.txt").is_file(), "the earlier script's effect stays");
     assert_eq!(fs::read(f.target.path().join("a.txt")).unwrap(), b"a");
@@ -2184,7 +2280,7 @@ fn f3_apply_is_idempotent_for_patch_blocks() {
     )
     .unwrap();
     fs::write(f.target.path().join("a.txt"), "listen {\nport: 80\n}\n").unwrap();
-    let first = tuckin(f.repo.path(), &["apply"]);
+    let first = tuckin(f.repo.path(), &["apply", "--overwrite", "home/a.txt"]);
     assert_eq!(first.status.code(), Some(0), "{}", String::from_utf8_lossy(&first.stderr));
     assert_eq!(fs::read(f.target.path().join("a.txt")).unwrap(), b"listen {\nport: 8080\n}\n");
     let second = tuckin(f.repo.path(), &["apply"]);
@@ -2237,7 +2333,7 @@ fn f3_a_sealed_entry_never_prints_plaintext() {
     fs::write(f.target.path().join("a.txt"), "old private content").unwrap();
     let preview = tuckin_age(f.repo.path(), &["diff", "--patch", "home/a.txt"], &envs);
     assert_eq!(preview.status.code(), Some(1), "{preview:?}");
-    assert_eq!(preview.stdout, b"overwrite home/a.txt\n  sealed content omitted\n");
+    assert_eq!(preview.stdout, b"blocked home/a.txt\n  existing content has no deployment record\n  sealed content omitted\n");
     fs::write(f.target.path().join("a.txt"), secret).unwrap();
 
     let source = fs::read(f.repo.path().join("home/a.txt")).unwrap();
@@ -3142,6 +3238,8 @@ fn edit_reseals_a_changed_body_and_apply_delivers_it() {
     let add = tuckin_age(f.repo.path(), &["add", "--encrypt", "home/a.txt"], &envs);
     assert_eq!(add.status.code(), Some(0), "{}", String::from_utf8_lossy(&add.stderr));
 
+    let agreed = tuckin_age(f.repo.path(), &["apply", "--no-scripts"], &envs);
+    assert!(agreed.status.success(), "{agreed:?}");
     let source_path = f.repo.path().join("home/a.txt");
     let first = assert_one_whole_seal(&fs::read(&source_path).unwrap());
     let (name, body) = shell::writer("{{#seal}}second{{/seal}}");
@@ -3252,8 +3350,8 @@ fn edit_fills_an_unfilled_patch_seal_where_the_declaration_says() {
     assert!(!sealed.contains('{'), "{sealed:?}");
 
     let status = tuckin_age(f.repo.path(), &["status"], &envs);
-    assert_eq!(String::from_utf8(status.stdout).unwrap(), "overwrite\thome/a.txt\n");
-    let apply = tuckin_age(f.repo.path(), &["apply"], &envs);
+    assert_eq!(String::from_utf8(status.stdout).unwrap(), "blocked\thome/a.txt\n");
+    let apply = tuckin_age(f.repo.path(), &["apply", "--overwrite", "home/a.txt"], &envs);
     assert_eq!(apply.status.code(), Some(0), "{}", String::from_utf8_lossy(&apply.stderr));
     assert_eq!(fs::read(f.target.path().join("a.txt")).unwrap(), b"ACDBend");
     let settled = tuckin_age(f.repo.path(), &["status"], &envs);
@@ -3477,7 +3575,11 @@ fn windows_private_files_create_replace_and_repair_a_sealed_target() {
     assert_no_secret(&add.stdout, &add.stderr);
     fs::remove_file(f.target.path().join("created")).unwrap();
     fs::write(f.target.path().join("replaced"), b"public predecessor").unwrap();
-    let apply = tuckin_age(f.repo.path(), &["apply", "--no-scripts"], &envs);
+    let apply = tuckin_age(
+        f.repo.path(),
+        &["apply", "--no-scripts", "--overwrite", "home/created", "home/replaced", "home/repaired"],
+        &envs,
+    );
     assert!(apply.status.success(), "{apply:?}");
     assert_eq!(apply.stdout, b"created\t1\noverwritten\t2\nunchanged\t0\nbytes\t21\n");
     print!("{}", String::from_utf8_lossy(&apply.stdout));

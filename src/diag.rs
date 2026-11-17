@@ -146,6 +146,7 @@ pub enum Error {
         cause: Box<Error>,
         files_written: usize,
         phase: ApplyPhase,
+        details: String,
     },
     RepositoryWriteStopped {
         cause: Box<Error>,
@@ -207,7 +208,7 @@ impl Error {
                 }
             }
             Error::Bare(line) => eprintln!("{line}"),
-            Error::ApplyStopped { cause, files_written, phase } => {
+            Error::ApplyStopped { cause, files_written, phase, details } => {
                 cause.report();
                 match phase {
                     ApplyPhase::Files => eprintln!(
@@ -217,6 +218,7 @@ impl Error {
                         "apply: file phase complete ({files_written} written); stopped during scripts"
                     ),
                 }
+                eprint!("{details}");
             }
             Error::RepositoryWriteStopped { cause, operation, written, spell } => {
                 cause.report();

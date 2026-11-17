@@ -10,7 +10,7 @@
 
 ## 安装
 
-发行包支持 Windows x64、Linux x64 和 Apple Silicon macOS。[下载 v0.1.0](https://github.com/nostalume/tuckin/releases/tag/v0.1.0) · [从源码构建](#build)
+发行包支持 Windows x64、Linux x64 和 Apple Silicon macOS。[下载 v0.1.1](https://github.com/nostalume/tuckin/releases/tag/v0.1.1) · [从源码构建](#build)
 
 **Windows 上的 Scoop**
 
@@ -41,16 +41,16 @@ nix --extra-experimental-features 'nix-command flakes' profile add 'github:nosta
 
 **安装脚本**
 
-在脚本所在目录运行对应平台的命令。脚本会校验发行包，默认将程序安装到 `~/.local/bin`。[发行版 PowerShell 脚本](https://github.com/nostalume/tuckin/releases/download/v0.1.0/install.ps1) · [发行版 shell 脚本](https://github.com/nostalume/tuckin/releases/download/v0.1.0/install.sh)
+在脚本所在目录运行对应平台的命令。脚本会校验发行包，默认将程序安装到 `~/.local/bin`。[发行版 PowerShell 脚本](https://github.com/nostalume/tuckin/releases/download/v0.1.1/install.ps1) · [发行版 shell 脚本](https://github.com/nostalume/tuckin/releases/download/v0.1.1/install.sh)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 v0.1.0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 v0.1.1
 ```
 
-当前源码中的 PowerShell 脚本会把默认目录加入用户 PATH。执行上面的命令后，重新打开终端并运行 `tuckin --version`。如果使用了 `v0.1.0` 随附的脚本，请先在 Windows 的「编辑账户的环境变量」中把 `%USERPROFILE%\.local\bin` 添加到用户 **Path**。也可用 `& "$HOME\.local\bin\tuckin.exe" --version` 立即确认安装。
+PowerShell 脚本会把默认安装目录加入用户 PATH。重新打开终端后运行 `tuckin --version`。也可用 `& "$HOME\.local\bin\tuckin.exe" --version` 直接确认。
 
 ```sh
-sh install.sh v0.1.0
+sh install.sh v0.1.1
 export PATH="$HOME/.local/bin:$PATH"
 tuckin --version
 ```
@@ -80,7 +80,7 @@ tuckin diff
 
 第一次预览显示 `create`，退出码 1 表示还有待写项。打开 `~/.tuckin-demo`，可以看到刚写的两行。最后一次预览输出为空，退出码为 0。主目录里的其他文件留在原处。
 
-已有仓库时，进入其目录后从 `tuckin diff` 开始。要通过 Git 拉取信任的仓库，可以在空目录运行 `tuckin init --from <repository>`。
+已有仓库时，进入其目录后从 `tuckin diff` 开始。普通 `tuckin init` 在空目录创建骨架，无需 Git。要克隆信任的仓库，先确保 Git 可用，再在空目录运行 `tuckin init --from <repository>`。如果手头只有仓库归档，解包后在里面运行 `tuckin status`。
 
 <a id="repository"></a>
 
@@ -126,7 +126,7 @@ paths = ["home/@config/zed/**"]
 {{#patch "line" prefix="theme="}}dark{{/patch}}
 ```
 
-运行 `tuckin diff --patch home/.tuckin-demo`，再执行部署。目标里会出现 `theme=dark`，旁边仍是原来的 `zoom=125`。以后应用修改缩放，再次部署也只管理主题值。如果目标已有稳定的 `zoom=` 行，而主题行可能还没出现，可以在补丁头部加 `insert_before="zoom="`。管理多行时可用[两个标记之间的补丁](docs/spec.zh-CN.md#patch)。
+运行 `tuckin diff --patch home/.tuckin-demo`。从整文件改为补丁会引入一个新管理范围，用 `tuckin apply --no-scripts --overwrite home/.tuckin-demo` 确认这次更新。目标里会出现 `theme=dark`，旁边仍是原来的 `zoom=125`。以后应用修改缩放，再次部署也只管理主题值。如果目标已有稳定的 `zoom=` 行，而主题行可能还没出现，可以在补丁头部加 `insert_before="zoom="`。管理多行时可用[两个标记之间的补丁](docs/spec.zh-CN.md#patch)。
 
 <a id="seals"></a>
 
@@ -152,6 +152,8 @@ tuckin diff --patch home/.tuckin-demo-token
 <a id="deployment"></a>
 
 ## 命令与参考
+
+如果 `apply` 提示会覆盖已有改动，先用 `tuckin diff --patch home/.gitconfig` 看差异。想保留本机改动，可以对支持回收的源运行 `tuckin absorb home/.gitconfig`。确定采用仓库版本时，运行 `tuckin apply --overwrite home/.gitconfig`。普通 `apply` 只列出少量已写入的路径。需要完整清单时加 `--list`，想看本次实际写入的单文件片段时加 `--patch home/.gitconfig`。
 
 用 `tuckin --help` 找命令，用 `tuckin apply --help` 查具体用法。`status` 列出计划，`diff` 查看待改项，`apply` 执行部署。`add` 将已有文件收进仓库，`edit` 用 `EDITOR` 指定的程序打开源，`absorb` 将受支持的目标改动收回源。
 

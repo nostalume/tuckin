@@ -17,7 +17,7 @@ const SELECTOR_HELP: &str = "Repository-relative path or directory prefix";
     bin_name = "tuckin",
     version,
     about = "Deploy a dotfiles repository to this machine",
-    after_help = "Run tuckin <COMMAND> --help for details.",
+    after_help = "Commands for an existing repository find the nearest tuckin.toml in the\ncurrent directory or a parent. Run tuckin <COMMAND> --help for details.",
     disable_help_subcommand = true
 )]
 struct Cli {
@@ -27,10 +27,10 @@ struct Cli {
 
 #[derive(Args)]
 struct SealArgs {
-    /// Write one seal. Use --seal=NAME to select a named patch
+    /// Fill or update a seal. Use --seal=NAME for a named patch
     #[arg(long, value_name = "NAME", require_equals = true, requires = "paths")]
     seal: Option<Option<String>>,
-    /// Generate fresh ciphertext for the configured recipients
+    /// Encrypt again for the configured recipients
     #[arg(long, requires = "paths")]
     rekey: bool,
 }
@@ -46,23 +46,48 @@ impl SealArgs {
 
 #[derive(Subcommand)]
 enum CliCmd {
-    /// Initialize a repository in an empty directory
+    /// Create or clone a repository, or prepare its age identity
     #[command(
-        long_about = "Create a skeleton in an empty directory, or use --from to clone with Git.\nIn an existing repository, --key prepares the local identity and sets the first recipient.\nWith recipients already configured, it prints the local public keys.",
-        after_long_help = "Example:\n  tuckin init"
+        long_about = concat!(
+            "Plain init creates tuckin.toml in the empty current directory without Git.\n",
+            "\n",
+            "--from SOURCE requires git and an empty directory with a writable parent.\n",
+            "SOURCE can be a Git URL or local repository path. Git handles authentication.\n",
+            "Tuckin checks the layout before installing the clone.\n",
+            "Without Git, unpack a Tuckin repository snapshot and run tuckin status there.\n",
+            "\n",
+            "Use --key inside an existing Tuckin repository. It finds the nearest tuckin.toml\n",
+            "and creates a private age identity if missing, or reuses a readable identity.\n",
+            "Identity lookup uses AGE_IDENTITY_FILE, then identity_file in tuckin.toml,\n",
+            "then ~/.config/age/keys.txt. Use AGE_PASSPHRASE for a protected identity.\n",
+            "\n",
+            "If recipients is unset and the identity contains one distinct key, --key writes\n",
+            "its public key to tuckin.toml. With several keys, set recipients explicitly.\n",
+            "If recipients is already set, --key prints the local public keys and keeps the\n",
+            "configured recipients. An unusable identity stops setup and stays in place.\n",
+            "--key and --from cannot be combined. Existing ciphertext is kept as-is.",
+        ),
+        after_long_help = "Examples\n  tuckin init\n  tuckin init --from ../dotfiles\n  tuckin init --key"
     )]
     Init {
-        /// Clone an existing Tuckin repository with Git
+        /// Use Git to clone into the empty current directory
         #[arg(long, value_name = "SOURCE")]
         from: Option<String>,
-        /// Prepare the local identity and set the first recipient
+        /// Prepare the local identity and initialize or inspect recipients
         #[arg(long, conflicts_with = "from")]
         key: bool,
     },
     /// Adopt existing target files into the repository
     #[command(
-        long_about = "Adopt existing target files as new repository sources.\nUse exact file paths. A path with an existing source is refused.",
-        after_long_help = "Example:\n  tuckin add --encrypt home/.ssh/id_ed25519"
+        long_about = concat!(
+            "Copy existing regular target files into the repository as new sources.\n",
+            "Use exact repository-relative file paths with a target on this machine.\n",
+            "An existing source prevents adoption. Target files stay in place.\n",
+            "\n",
+            "Use --encrypt to store whole-file seals for the recipients in tuckin.toml.\n",
+            "Encryption needs configured public recipients and can run without a private key.",
+        ),
+        after_long_help = "Examples\n  tuckin add home/.gitconfig\n  tuckin add --encrypt home/.ssh/id_ed25519"
     )]
     Add {
         /// Repository-relative path for a new source
@@ -74,8 +99,19 @@ enum CliCmd {
     },
     /// Open repository files for editing
     #[command(
-        long_about = "Open existing repository files with the program named by $EDITOR.\nOmit PATH to open tuckin.toml. On POSIX, seals open in a protected session.\n\nWith --seal, take new contents from hidden input or stdin. With --rekey,\nopen the current ciphertext and seal it for the configured recipients.\nWith both options, seal the supplied contents without opening the old seal.\nThese options require one exact path.",
-        after_long_help = "Example:\n  tuckin edit home/.ssh/id_ed25519 --seal"
+        long_about = concat!(
+            "Open existing repository files with $EDITOR. Set it to one executable name or\n",
+            "path. Omit PATH to open tuckin.toml. Specify exact file paths to edit other files.\n",
+            "POSIX supports protected editing of sealed sources. Use seal options on Windows.\n",
+            "\n",
+            "Seal options require configured recipients and write one exact source file.\n",
+            "--seal takes nonempty hidden input or raw bytes from redirected stdin. It\n",
+            "selects a whole-file seal or a patch body. Updating a filled seal needs its\n",
+            "old identity. --rekey alone opens all filled seals and re-encrypts them for\n",
+            "the configured recipients. Combine both options to write one body from new\n",
+            "input using only the configured recipients. The seal options skip the editor.",
+        ),
+        after_long_help = "Examples\n  tuckin edit\n  tuckin edit home/.ssh/id_ed25519 --seal"
     )]
     Edit {
         /// Repository-relative file path [default: tuckin.toml]
@@ -84,10 +120,17 @@ enum CliCmd {
         #[command(flatten)]
         seals: SealArgs,
     },
-    /// Preview pending writes
+    /// Preview pending or blocked changes
     #[command(
-        long_about = "Preview pending writes. Omit PATH to include all entries.\n\nBy default, the terminal shows a short summary. Redirect stdout for the\ncomplete pending list in TSV. Exit status 1 means writes are pending.",
-        after_long_help = "Example:\n  tuckin diff --patch home/.gitconfig"
+        long_about = concat!(
+            "Preview pending and blocked changes. Omit PATH to include all active entries.\n",
+            "The terminal shows a short summary. Redirect stdout for the full list in TSV.\n",
+            "\n",
+            "Use --patch with one exact source file for a bounded preview. Sealed and binary\n",
+            "files show only their status. Exit status 0 means no differences, 1 means\n",
+            "differences or blocked changes, and 2 means an error.",
+        ),
+        after_long_help = "Example\n  tuckin diff --patch home/.gitconfig"
     )]
     Diff {
         #[arg(value_name = "PATH", help = SELECTOR_HELP)]
@@ -98,8 +141,14 @@ enum CliCmd {
     },
     /// Show the planned action for each entry
     #[command(
-        long_about = "Show whether each selected entry would be created, overwritten or unchanged.\nOmit PATH to include all entries.",
-        after_long_help = "Example:\n  tuckin status home/.config"
+        long_about = concat!(
+            "List the planned action for each selected file as TSV. Omit PATH to include all\n",
+            "active entries. Actions are create, overwrite, repair, blocked and unchanged.\n",
+            "A ? row names an unmanaged neighboring file. An ignored count covers the\n",
+            "whole repository scan. Exit status 0 means the report succeeded, even when\n",
+            "it contains pending or blocked changes.",
+        ),
+        after_long_help = "Example\n  tuckin status home/.config"
     )]
     Status {
         #[arg(value_name = "PATH", help = SELECTOR_HELP)]
@@ -107,20 +156,53 @@ enum CliCmd {
     },
     /// Deploy files and run repository scripts
     #[command(
-        long_about = "Deploy files, then run repository scripts. Omit PATH to deploy all entries.\n\nPATH selects which files to evaluate and deploy. All target placements are\nvalidated. Scripts run with your account's permissions and can write outside\nthe deployment targets. Use --no-scripts to skip them.",
-        after_long_help = "Example:\n  tuckin apply --no-scripts home/.gitconfig"
+        long_about = concat!(
+            "Deploy selected files, then run enabled repository scripts. Omit PATH to select\n",
+            "all active entries. Replacing existing managed bytes requires a matching\n",
+            "deployment record. A conflict stops the batch before file writes or scripts. Use\n",
+            "--overwrite with exact source paths to choose the repository versions.\n",
+            "\n",
+            "File selection leaves scripts enabled, even if no files change. Scripts run\n",
+            "from the repository root with your account permissions. Use --no-scripts for\n",
+            "files only. A failure after publication begins keeps the writes already made.\n",
+            "\n",
+            "The terminal shows counts and a short list of published paths. Redirected\n",
+            "default output contains TSV counts. Use --list for every published path or\n",
+            "--patch for a bounded preview of one applied file. These modes are exclusive.",
+        ),
+        after_long_help = "Examples\n  tuckin apply --no-scripts\n  tuckin apply --overwrite --patch home/.gitconfig"
     )]
     Apply {
         #[arg(value_name = "PATH", help = SELECTOR_HELP)]
         paths: Vec<String>,
-        /// Skip the script phase entirely
+        /// Skip repository scripts
         #[arg(long)]
         no_scripts: bool,
+        /// Replace exact files with the repository versions
+        #[arg(long, requires = "paths")]
+        overwrite: bool,
+        /// Print every published file action and path as TSV
+        #[arg(long, conflicts_with = "patch")]
+        list: bool,
+        /// Preview one written file. Requires an exact source path
+        #[arg(long, requires = "paths")]
+        patch: bool,
     },
     /// Copy target changes back into the repository
     #[command(
-        long_about = "Copy target changes back into repository sources. Omit PATH to select all\nentries. For a patch, collect only the ranges it owns. Ordinary collection\nskips missing targets.\n\nWith --seal, seal one body from the target. With --rekey, recover filled\nseals from the target for the configured recipients. With both options,\nrecover only the selected body. These options require one exact path.",
-        after_long_help = "Example:\n  tuckin absorb home/.config/scoop/config.json --seal=virustotal"
+        long_about = concat!(
+            "Copy target contents back into existing repository sources. Omit PATH to include\n",
+            "all active entries. Ordinary absorb collects whole literal files, filled seals\n",
+            "and representable patch bodies. It skips missing targets and unfilled seals.\n",
+            "Use diff --patch PATH to compare the two versions before collecting.\n",
+            "\n",
+            "Seal options require one exact source file and configured recipients. --seal\n",
+            "takes the value from the selected target file or patch range. --rekey rebuilds\n",
+            "all filled seals in the file from the target using the current recipients.\n",
+            "Combine both options to rebuild just the selected body. Rekeying from the\n",
+            "target can recover it without access to the old identity.",
+        ),
+        after_long_help = "Examples\n  tuckin absorb home/.gitconfig\n  tuckin absorb home/.config/scoop/config.json --seal=virustotal"
     )]
     Absorb {
         #[arg(value_name = "PATH", help = SELECTOR_HELP)]
@@ -139,7 +221,9 @@ impl From<CliCmd> for Cmd {
             CliCmd::Edit { paths, seals } => Cmd::Edit { paths, seals: seals.action() },
             CliCmd::Diff { paths, patch } => Cmd::Diff { paths, patch },
             CliCmd::Status { paths } => Cmd::Status { paths },
-            CliCmd::Apply { paths, no_scripts } => Cmd::Apply { paths, no_scripts },
+            CliCmd::Apply { paths, no_scripts, overwrite, list, patch } => {
+                Cmd::Apply { paths, no_scripts, overwrite, list, patch }
+            }
             CliCmd::Absorb { paths, seals } => Cmd::Absorb { paths, seals: seals.action() },
         }
     }
@@ -193,7 +277,10 @@ mod tests {
                 takes_encrypt,
                 "{command} --encrypt"
             );
-            assert_eq!(parse(&[command, "--patch", "home/x"]).is_ok(), command == "diff");
+            assert_eq!(
+                parse(&[command, "--patch", "home/x"]).is_ok(),
+                matches!(command, "diff" | "apply")
+            );
         }
     }
 

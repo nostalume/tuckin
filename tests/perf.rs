@@ -198,15 +198,16 @@ fn diff_all_unchanged() {
 /// costs 0.6 s on this machine even without a stage, so the earlier 300 ms figure was an
 /// estimate, not a measurement (see `plan.md` for the re-pricing).
 ///
-/// The targets are made stale outside the timed region: rewriting them is the setup, not the
+/// The sources are changed outside the timed region. Rewriting them is the setup, not the
 /// operation being measured.
 #[test]
 #[ignore = "release only"]
 fn apply_all_overwrite() {
-    let (repo, target) = corpus(true);
+    let (repo, _target) = corpus(true);
+    tuckin::apply_at(repo.path(), &[], true).unwrap();
     let mut best = Duration::MAX;
-    for _ in 0..5 {
-        dirty(&target);
+    for byte in b"12345" {
+        change_sources(&repo, *byte);
         let started = Instant::now();
         let text = tuckin::apply_at(repo.path(), &[], true).unwrap();
         best = best.min(started.elapsed());
@@ -230,11 +231,12 @@ fn apply_all_unchanged() {
     assert!(elapsed < Duration::from_millis(1000), "{elapsed:?} is 10x the budget");
 }
 
-fn dirty(target: &TempDir) {
+fn change_sources(repo: &TempDir, byte: u8) {
+    let content = vec![byte; REPO_BYTES / FILES];
     for bucket in 0..10 {
-        let dir = target.path().join(format!("d{bucket:02}"));
+        let dir = repo.path().join(format!("home/d{bucket:02}"));
         for file in 0..FILES / 10 {
-            fs::write(dir.join(format!("f{file:02}.txt")), b"stale").unwrap();
+            fs::write(dir.join(format!("f{file:02}.txt")), &content).unwrap();
         }
     }
 }

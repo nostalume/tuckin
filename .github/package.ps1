@@ -18,8 +18,10 @@ $archive = Join-Path (New-Item -ItemType Directory -Path dist -Force).FullName "
 $scratch = [System.IO.Directory]::CreateTempSubdirectory('tuckin-package-').FullName
 $source = Join-Path $scratch 'source'
 $consumer = Join-Path $scratch 'consumer'
+$previousState = $env:TUCKIN_STATE_DIR
 
 try {
+    $env:TUCKIN_STATE_DIR = Join-Path $scratch 'deployment-state'
     New-Item -ItemType Directory -Path $source, $consumer | Out-Null
     Copy-Item -LiteralPath "target/release/$binary", 'LICENSE' -Destination $source
     if ($windows) {
@@ -57,5 +59,6 @@ win = $mapping
         Pop-Location
     }
 } finally {
+    $env:TUCKIN_STATE_DIR = $previousState
     Remove-Item -LiteralPath $scratch -Recurse -Force
 }

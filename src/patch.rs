@@ -1,7 +1,6 @@
 //! A patch locates owned bytes in the original target and supplies their desired contents.
 //! All edits are planned before one splice. Applying the result again must require no edits.
 
-use std::borrow::Cow;
 use std::ops::Range;
 
 use crate::content::Block;
@@ -50,7 +49,7 @@ struct Insertion<'a> {
 struct Edit<'a> {
     block: &'a Block,
     location: Location<'a>,
-    bytes: Cow<'a, [u8]>,
+    body: &'a [u8],
 }
 
 pub(crate) fn patched_bytes<'a>(
@@ -58,6 +57,7 @@ pub(crate) fn patched_bytes<'a>(
     blocks: &'a [Block],
     target: &[u8],
     mut open: impl FnMut(&'a Block) -> Result<Payload<'a>, Diag>,
+    mut compare: impl FnMut(&Block, Option<&[u8]>, &[u8]),
 ) -> Result<Vec<u8>, Error> {
     let mut bodies = Vec::with_capacity(blocks.len());
     let mut errors = Vec::new();
@@ -80,6 +80,13 @@ pub(crate) fn patched_bytes<'a>(
         return Err(Error::collected(errors));
     }
     let edits = plan_edits(spell, blocks, &bodies, target)?;
+    for edit in &edits {
+        let range = &edit.location.range;
+        let inserts = edit.location.insertion.is_some()
+            || (matches!(edit.block.selector, Selector::Between(_)) && range.is_empty());
+        let current = (!inserts).then(|| &target[range.clone()]);
+        compare(edit.block, current, edit.body);
+    }
     if edits.iter().all(|edit| !edit.changes(target)) {
         return Ok(target.to_vec());
     }
@@ -108,11 +115,7 @@ fn plan_edits<'a>(
                 continue;
             }
         };
-        let bytes = match &location.insertion {
-            Some(at) => Cow::Owned([at.indent, at.prefix, body.bytes(), at.ending].concat()),
-            None => Cow::Borrowed(body.bytes()),
-        };
-        edits.push(Edit { block, location, bytes });
+        edits.push(Edit { block, location, body: body.bytes() });
     }
     if !errors.is_empty() {
         return Err(Error::collected(errors));
@@ -133,7 +136,7 @@ pub(crate) fn collect_ranges<'a>(
         .map(|block| {
             let may_insert = !selected.is_empty() && !selected.contains(&block.index);
             let location = locate_patch(spell, block, target, &starts, may_insert)?;
-            Ok(Edit { block, location, bytes: Cow::Borrowed(&[]) })
+            Ok(Edit { block, location, body: &[] })
         })
         .collect::<Result<Vec<_>, Diag>>()?;
     check_edits(spell, &mut edits)?;
@@ -338,7 +341,7 @@ fn affects(edit: &Range<usize>, guard: &Range<usize>) -> bool {
 
 impl Edit<'_> {
     fn changes(&self, target: &[u8]) -> bool {
-        target[self.location.range.clone()] != *self.bytes
+        self.location.insertion.is_some() || target[self.location.range.clone()] != *self.body
     }
 }
 
@@ -348,7 +351,14 @@ fn splice_edits(edits: &[Edit<'_>], target: &[u8]) -> Vec<u8> {
     for edit in edits {
         let range = &edit.location.range;
         out.extend_from_slice(&target[cursor..range.start]);
-        out.extend_from_slice(&edit.bytes);
+        match &edit.location.insertion {
+            Some(at) => {
+                for bytes in [at.indent, at.prefix, edit.body, at.ending] {
+                    out.extend_from_slice(bytes);
+                }
+            }
+            None => out.extend_from_slice(edit.body),
+        }
         cursor = range.end;
     }
     out.extend_from_slice(&target[cursor..]);

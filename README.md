@@ -10,7 +10,7 @@ Keep one dotfiles repository for all your machines. Tuckin can deploy a file you
 
 ## Install
 
-Release archives cover Windows x64, Linux x64, and Apple Silicon macOS. [Download v0.1.0](https://github.com/nostalume/tuckin/releases/tag/v0.1.0) · [Build from source](#build)
+Release archives cover Windows x64, Linux x64, and Apple Silicon macOS. [Download v0.1.1](https://github.com/nostalume/tuckin/releases/tag/v0.1.1) · [Build from source](#build)
 
 **Scoop on Windows**
 
@@ -41,16 +41,16 @@ nix --extra-experimental-features 'nix-command flakes' profile add 'github:nosta
 
 **Install script**
 
-Run the command for your platform from the directory containing the script. Each script verifies the release archive and installs into `~/.local/bin` by default. [Released PowerShell script](https://github.com/nostalume/tuckin/releases/download/v0.1.0/install.ps1) · [Released shell script](https://github.com/nostalume/tuckin/releases/download/v0.1.0/install.sh)
+Run the command for your platform from the directory containing the script. Each script verifies the release archive and installs into `~/.local/bin` by default. [Released PowerShell script](https://github.com/nostalume/tuckin/releases/download/v0.1.1/install.ps1) · [Released shell script](https://github.com/nostalume/tuckin/releases/download/v0.1.1/install.sh)
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 v0.1.0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 v0.1.1
 ```
 
-The PowerShell script in this checkout adds its default directory to your user PATH. After the command above, reopen your terminal and run `tuckin --version`. If you used the script bundled with `v0.1.0`, add `%USERPROFILE%\.local\bin` to user **Path** in Windows' **Edit environment variables for your account** dialog first. To confirm the installation immediately, run `& "$HOME\.local\bin\tuckin.exe" --version`.
+The PowerShell script adds the default directory to your user PATH. Reopen your terminal and run `tuckin --version`. To check the installed executable directly, run `& "$HOME\.local\bin\tuckin.exe" --version`.
 
 ```sh
-sh install.sh v0.1.0
+sh install.sh v0.1.1
 export PATH="$HOME/.local/bin:$PATH"
 tuckin --version
 ```
@@ -80,7 +80,7 @@ tuckin diff
 
 The first preview says `create` and exits with 1 to signal pending work. Open `~/.tuckin-demo` and you'll find the two lines you wrote. The final preview is empty with exit status 0. Tuckin leaves other files in your home directory alone.
 
-For an existing repository, enter its directory and start with `tuckin diff`. To clone a trusted repository with Git, run `tuckin init --from <repository>` in an empty directory.
+For an existing repository, enter its directory and start with `tuckin diff`. Plain `tuckin init` creates a skeleton in an empty directory without Git. To clone a trusted repository, make Git available and run `tuckin init --from <repository>` in an empty directory. If you only have a repository archive, unpack it and run `tuckin status` there.
 
 <a id="repository"></a>
 
@@ -126,7 +126,7 @@ Imagine an app owns the zoom value from the first exercise and you only want to 
 {{#patch "line" prefix="theme="}}dark{{/patch}}
 ```
 
-Run `tuckin diff --patch home/.tuckin-demo` and apply the file again. You'll see `theme=dark` in the target beside the original `zoom=125`. The app can update zoom after that, and a future apply still owns only the theme's value. If a target already has a stable `zoom=` line but might lack a theme line, add `insert_before="zoom="` to the header. For a group of lines, use a [patch between two markers](docs/spec.md#patch).
+Run `tuckin diff --patch home/.tuckin-demo`. Switching from whole-file ownership to a patch introduces a new managed range. Confirm this first update with `tuckin apply --no-scripts --overwrite home/.tuckin-demo`. You'll see `theme=dark` in the target beside the original `zoom=125`. The app can update zoom after that, and a future apply still owns only the theme's value. If a target already has a stable `zoom=` line but might lack a theme line, add `insert_before="zoom="` to the header. For a group of lines, use a [patch between two markers](docs/spec.md#patch).
 
 <a id="seals"></a>
 
@@ -152,6 +152,8 @@ For a trusted repository, place a setup script such as `scripts/gate-10-setup.ps
 <a id="deployment"></a>
 
 ## Commands and reference
+
+When `apply` stops for an existing change, inspect it with `tuckin diff --patch home/.gitconfig`. To keep the local edits, run `tuckin absorb home/.gitconfig` if the source can represent them. To choose the repository copy, run `tuckin apply --overwrite home/.gitconfig`. A normal `apply` lists a few completed changes. Add `--list` to capture every changed path or `--patch home/.gitconfig` to show the actual change for that one file.
 
 Use `tuckin --help` to find commands and `tuckin apply --help` for an individual command. `status` lists planned actions, `diff` shows what needs to change, and `apply` deploys it. Use `add` to adopt an existing file, `edit` to open a source with the executable named by `EDITOR`, and `absorb` to collect supported target changes back into a source.
 

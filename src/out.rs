@@ -9,7 +9,7 @@ use std::fmt::Write;
 
 use crate::commit::Written;
 use crate::diff_preview;
-use crate::plan::{Item, Verdict};
+use crate::plan::{Action, Item, Verdict};
 
 /// The three ASCII words of a `status` line. Not the spec's Chinese verdict names: this column
 /// is an interface and has to survive `grep` and `cut -f1`. Attached to the verdict so the
@@ -19,6 +19,8 @@ impl Verdict {
         match self {
             Verdict::Create => "create",
             Verdict::Overwrite => "overwrite",
+            Verdict::Repair => "repair",
+            Verdict::Blocked => "blocked",
             Verdict::Skip => "unchanged",
         }
     }
@@ -48,7 +50,7 @@ impl Written {
 pub fn status(items: &[Item], undeclared: &[String], ignored: usize) -> String {
     let mut text = String::with_capacity(items.len() * 32 + undeclared.len() * 48);
     for item in items {
-        text.push_str(item.verdict.word());
+        text.push_str(item.verdict().word());
         text.push('\t');
         text.push_str(&item.spell);
         text.push('\n');
@@ -73,8 +75,8 @@ pub fn diff(items: &[Item]) -> String {
     // Capacity from the upper bound, not from a counting pass: `items.len()` may over-reserve by
     // the skipped entries, which is cheaper than traversing twice to save a few bytes.
     let mut text = String::with_capacity(items.len() * 32);
-    for item in items.iter().filter(|item| item.verdict.needs_write()) {
-        text.push_str(item.verdict.word());
+    for item in items.iter().filter(|item| item.verdict().pending()) {
+        text.push_str(item.verdict().word());
         text.push('\t');
         text.push_str(&item.spell);
         text.push('\n');
@@ -84,27 +86,35 @@ pub fn diff(items: &[Item]) -> String {
 
 /// A terminal gets a bounded sample of the same pending writes as the TSV list.
 pub(crate) fn diff_summary(items: &[Item]) -> String {
-    const PATHS: usize = 6;
-    let mut created = 0;
-    let mut overwritten = 0;
+    let mut counts = [0; 4];
     let mut sample = Vec::with_capacity(PATHS);
-    for item in items.iter().filter(|item| item.verdict.needs_write()) {
-        if item.verdict == Verdict::Create {
-            created += 1;
-        } else {
-            overwritten += 1;
-        }
+    for item in items.iter().filter(|item| item.verdict().pending()) {
+        counts[match item.verdict() {
+            Verdict::Create => 0,
+            Verdict::Overwrite => 1,
+            Verdict::Repair => 2,
+            Verdict::Blocked => 3,
+            Verdict::Skip => unreachable!("filtered"),
+        }] += 1;
         if sample.len() < PATHS {
             sample.push(item);
         }
     }
-    let total = created + overwritten;
+    let [created, overwritten, repair, blocked] = counts;
+    let total = counts.iter().sum::<usize>();
     if total == 0 {
         return String::new();
     }
-    let mut text = format!("{total} changes ({created} create, {overwritten} overwrite)\n");
+    let mut text = format!("{total} changes ({created} create, {overwritten} overwrite");
+    if repair > 0 {
+        let _ = write!(text, ", {repair} repair");
+    }
+    if blocked > 0 {
+        let _ = write!(text, ", {blocked} blocked");
+    }
+    text.push_str(")\n");
     for item in &sample {
-        let prefix = format!("  {:<9}  ", item.verdict.word());
+        let prefix = format!("  {:<9}  ", item.verdict().word());
         let path = diff_preview::path(&item.spell, diff_preview::WIDTH - prefix.len());
         let _ = writeln!(text, "{prefix}{path}");
     }
@@ -114,24 +124,90 @@ pub(crate) fn diff_summary(items: &[Item]) -> String {
     text
 }
 
+const PATHS: usize = 6;
+
+pub(crate) fn blocked(items: &[Item]) -> Option<crate::diag::Error> {
+    let mut blocked = items.iter().filter_map(|item| match item.action {
+        Action::Blocked(blocker) => Some((item, blocker)),
+        _ => None,
+    });
+    let mut text = String::new();
+    for (item, blocker) in blocked.by_ref().take(PATHS) {
+        let path = diff_preview::path(&item.spell, 72);
+        let _ = write!(text, "  {path}");
+        if let Some(block) = blocker.block {
+            let _ = write!(text, " (patch block {block})");
+        }
+        let _ = writeln!(text, " · {}", blocker.conflict.description());
+    }
+    if text.is_empty() {
+        return None;
+    }
+    let more = blocked.count();
+    if more > 0 {
+        let _ = writeln!(text, "  … {more} more");
+    }
+    Some(crate::diag::Error::bare(format!(
+        "apply: blocked (0 files written)\n{text}Inspect with tuckin diff --patch PATH. Use absorb PATH to collect supported changes,\nor apply --overwrite PATH to choose the repository version for exact files."
+    )))
+}
+
+impl Written {
+    pub(crate) fn list(&self) -> String {
+        let mut text = String::new();
+        for (verdict, path) in &self.paths {
+            let _ = writeln!(text, "{}\t{path}", verdict.word());
+        }
+        text
+    }
+
+    pub(crate) fn terminal(&self) -> String {
+        let repaired = self.paths.iter().filter(|(v, _)| *v == Verdict::Repair).count();
+        let mut text = format!(
+            "Applied {} files ({} created, {} updated, {} repaired)\n",
+            self.paths.len(),
+            self.created,
+            self.overwritten - repaired,
+            repaired,
+        );
+        for (verdict, path) in self.paths.iter().take(PATHS) {
+            let word = match verdict {
+                Verdict::Create => "created",
+                Verdict::Repair => "repaired",
+                _ => "updated",
+            };
+            let _ = writeln!(text, "  {word:<8} {}", diff_preview::path(path, 65));
+        }
+        let more = self.paths.len().saturating_sub(PATHS);
+        if more > 0 {
+            let _ = writeln!(text, "  … {more} more");
+        }
+        text
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::Reason;
 
     fn item(spell: &str, verdict: Verdict) -> Item {
         Item {
             spell: spell.to_string(),
             target: format!("/t/{spell}"),
             form: crate::content::Form::Whole,
-            verdict,
-            reason: match verdict {
-                Verdict::Skip => Some(Reason::Unchanged),
-                _ => None,
+            action: match verdict {
+                Verdict::Create => Action::Create,
+                Verdict::Skip => Action::Keep,
+                Verdict::Overwrite => Action::Replace {
+                    basis: pulith::hash::DigestValue::sha256(b"old"),
+                    repair: false,
+                },
+                _ => unreachable!(),
             },
             expected: Vec::new(),
             sealed: false,
-            basis: None,
+            record: None,
+            before: None,
             position: format!("/target/{spell}").into(),
         }
     }
